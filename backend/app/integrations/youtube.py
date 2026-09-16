@@ -17,7 +17,7 @@ SCOPES = [
 def _utc_rfc3339(value: datetime) -> str:
     """
     Convert a datetime to UTC RFC3339 format required by YouTube.
-    The database currently stores naive UTC datetimes.
+    Database datetimes are stored as naive UTC.
     """
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
@@ -33,13 +33,11 @@ def _utc_rfc3339(value: datetime) -> str:
 
 
 def get_service():
-    token = Path(
-        settings.youtube_token_file
-    )
+    token = Path(settings.youtube_token_file)
 
     creds = (
         Credentials.from_authorized_user_file(
-            token,
+            str(token),
             SCOPES,
         )
         if token.exists()
@@ -55,6 +53,7 @@ def get_service():
             from google.auth.transport.requests import Request
 
             creds.refresh(Request())
+
         else:
             client_secret = Path(
                 settings.youtube_client_secrets_file
@@ -99,7 +98,7 @@ def publish_video(
     title: str,
     description: str,
     hashtags: str,
-    publish_at=None,
+    publish_at: datetime | None = None,
     privacy: str | None = None,
 ) -> str:
     path = Path(media_path)
@@ -128,14 +127,10 @@ def publish_video(
         if item.strip("# ")
     ]
 
-    status = {
+    status: dict[str, str] = {
         "privacyStatus": (
             privacy
-            or (
-                "private"
-                if publish_at
-                else settings.youtube_default_privacy
-            )
+            or settings.youtube_default_privacy
         )
     }
 
@@ -175,7 +170,8 @@ def publish_video(
 
     if not video_id:
         raise RuntimeError(
-            "YouTube upload completed without returning a video ID"
+            "YouTube upload completed without "
+            "returning a video ID"
         )
 
     return video_id
