@@ -1,5 +1,6 @@
 import json
 import subprocess
+import unicodedata
 from pathlib import Path
 from uuid import uuid4
 
@@ -30,7 +31,10 @@ def _resolve_whisper_model() -> str:
     )
 
 
-def _run_command(command: list[str], error_message: str) -> None:
+def _run_command(
+    command: list[str],
+    error_message: str,
+) -> None:
     try:
         completed = subprocess.run(
             command,
@@ -89,6 +93,25 @@ def _extract_audio(input_path: Path) -> Path:
     return audio_path
 
 
+def _is_special_token(text: str) -> bool:
+    return (
+        text.startswith("[")
+        and text.endswith("]")
+    )
+
+
+def _is_punctuation(text: str) -> bool:
+    cleaned = text.strip()
+
+    if not cleaned:
+        return False
+
+    return all(
+        unicodedata.category(char).startswith("P")
+        for char in cleaned
+    )
+
+
 def _parse_whisper_json(output_file: Path) -> dict:
     if not output_file.is_file():
         raise RuntimeError(
@@ -117,18 +140,24 @@ def _parse_whisper_json(output_file: Path) -> dict:
         if text:
             texts.append(text)
 
+        current_word = ""
+        current_start = None
+        current_end = None
+
         for token in segment.get("tokens", []):
             if not isinstance(token, dict):
                 continue
 
-            word_text = str(
+            raw_text = str(
                 token.get("text", "")
-            ).strip()
+            )
 
-            if not word_text:
+            token_text = raw_text.strip()
+
+            if not token_text:
                 continue
 
-            if word_text.startswith("[") and word_text.endswith("]"):
+            if _is_special_token(token_text):
                 continue
 
             offsets = token.get("offsets", {})
@@ -145,11 +174,38 @@ def _parse_whisper_json(output_file: Path) -> dict:
             if end <= start:
                 continue
 
+            if _is_punctuation(token_text):
+                continue
+
+            has_leading_space = raw_text[:1].isspace()
+
+            if current_word and has_leading_space:
+                words.append(
+                    {
+                        "word": current_word.strip(),
+                        "start": current_start,
+                        "end": current_end,
+                    }
+                )
+
+                current_word = token_text
+                current_start = start
+                current_end = end
+            else:
+                if not current_word:
+                    current_word = token_text
+                    current_start = start
+                else:
+                    current_word += token_text
+
+                current_end = end
+
+        if current_word:
             words.append(
                 {
-                    "word": word_text,
-                    "start": start,
-                    "end": end,
+                    "word": current_word.strip(),
+                    "start": current_start,
+                    "end": current_end,
                 }
             )
 
@@ -164,6 +220,12 @@ def _parse_whisper_json(output_file: Path) -> dict:
         raise RuntimeError(
             "Whisper returned an empty transcription."
         )
+
+    words = [
+        word
+        for word in words
+        if word["word"]
+    ]
 
     return {
         "language": language,
@@ -189,10 +251,12 @@ def transcribe(path: str) -> dict:
     )
 
     audio_path = None
+
     output_base = (
         Path(settings.media_dir)
         / f"whisper_{uuid4().hex}"
     )
+
     output_json = output_base.with_suffix(".json")
 
     try:
