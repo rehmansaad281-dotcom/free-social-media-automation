@@ -28,9 +28,41 @@ from .integrations.tiktok import creator_info
 
 app = FastAPI(title=settings.app_name)
 
+MEDIA_ROOT = Path(settings.media_dir).resolve()
+
 Path(settings.media_dir).mkdir(parents=True, exist_ok=True)
 Path("./data").mkdir(exist_ok=True)
 Path("./secrets").mkdir(exist_ok=True)
+
+
+def _safe_media_path(path: str) -> Path:
+    """
+    Resolve a stored media path and make sure it remains inside
+    the configured media directory.
+    """
+    candidate = Path(path).resolve()
+
+    try:
+        candidate.relative_to(MEDIA_ROOT)
+    except ValueError as exc:
+        raise HTTPException(
+            403,
+            "Media path is outside the configured media directory",
+        ) from exc
+
+    return candidate
+
+
+def _utc_naive(value: datetime) -> datetime:
+    """
+    Convert an incoming datetime to UTC and store it as a naive UTC
+    datetime because the current SQLAlchemy model uses DateTime without
+    timezone=True.
+    """
+    if value.tzinfo is None:
+        return value
+
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 @app.on_event("startup")
@@ -71,18 +103,51 @@ async def upload_media(
         file.content_type.startswith("video/")
         or file.content_type.startswith("image/")
     ):
-        raise HTTPException(400, "Only video/image files are allowed")
+        raise HTTPException(
+            400,
+            "Only video/image files are allowed",
+        )
+
+    original_filename = file.filename or "upload"
+    ext = Path(original_filename).suffix.lower()
+
+    name = f"{uuid4().hex}{ext}"
+    path = MEDIA_ROOT / name
 
     max_bytes = settings.max_upload_mb * 1024 * 1024
-    data = await file.read(max_bytes + 1)
+    total_bytes = 0
 
-    if len(data) > max_bytes:
-        raise HTTPException(413, "File exceeds configured upload limit")
+    try:
+        with path.open("wb") as output:
+            while True:
+                chunk = await file.read(1024 * 1024)
 
-    ext = Path(file.filename or "").suffix.lower()
-    name = f"{uuid4().hex}{ext}"
-    path = Path(settings.media_dir) / name
-    path.write_bytes(data)
+                if not chunk:
+                    break
+
+                total_bytes += len(chunk)
+
+                if total_bytes > max_bytes:
+                    raise HTTPException(
+                        413,
+                        "File exceeds configured upload limit",
+                    )
+
+                output.write(chunk)
+
+    except HTTPException:
+        path.unlink(missing_ok=True)
+        raise
+
+    except Exception as exc:
+        path.unlink(missing_ok=True)
+        raise HTTPException(
+            500,
+            f"Failed to save uploaded media: {exc}",
+        ) from exc
+
+    finally:
+        await file.close()
 
     media_type = (
         "video"
@@ -91,7 +156,7 @@ async def upload_media(
     )
 
     item = Media(
-        filename=file.filename or name,
+        filename=original_filename,
         path=str(path),
         media_type=media_type,
         mime_type=file.content_type,
@@ -111,7 +176,11 @@ async def upload_media(
 
 @app.get("/api/media")
 def list_media(db: Session = Depends(get_db)):
-    return db.query(Media).order_by(Media.id.desc()).all()
+    return (
+        db.query(Media)
+        .order_by(Media.id.desc())
+        .all()
+    )
 
 
 @app.get("/api/media/{media_id}")
@@ -122,11 +191,23 @@ def get_media(
     item = db.get(Media, media_id)
 
     if not item:
-        raise HTTPException(404, "Media not found")
+        raise HTTPException(
+            404,
+            "Media not found",
+        )
+
+    path = _safe_media_path(item.path)
+
+    if not path.is_file():
+        raise HTTPException(
+            404,
+            "Media file not found",
+        )
 
     return FileResponse(
-        item.path,
+        path,
         media_type=item.mime_type or None,
+        filename=item.filename,
     )
 
 
@@ -135,7 +216,18 @@ def create_content(
     payload: ContentCreate,
     db: Session = Depends(get_db),
 ):
-    item = Content(**payload.model_dump())
+    if payload.media_id is not None:
+        media = db.get(Media, payload.media_id)
+
+        if not media:
+            raise HTTPException(
+                404,
+                "Media not found",
+            )
+
+    item = Content(
+        **payload.model_dump()
+    )
 
     db.add(item)
     db.commit()
@@ -146,7 +238,11 @@ def create_content(
 
 @app.get("/api/content")
 def list_content(db: Session = Depends(get_db)):
-    return db.query(Content).order_by(Content.id.desc()).all()
+    return (
+        db.query(Content)
+        .order_by(Content.id.desc())
+        .all()
+    )
 
 
 @app.patch("/api/content/{content_id}")
@@ -158,9 +254,28 @@ def update_content(
     item = db.get(Content, content_id)
 
     if not item:
-        raise HTTPException(404, "Content not found")
+        raise HTTPException(
+            404,
+            "Content not found",
+        )
 
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(
+        exclude_unset=True
+    )
+
+    if "media_id" in updates and updates["media_id"] is not None:
+        media = db.get(
+            Media,
+            updates["media_id"],
+        )
+
+        if not media:
+            raise HTTPException(
+                404,
+                "Media not found",
+            )
+
+    for key, value in updates.items():
         setattr(item, key, value)
 
     db.commit()
@@ -175,12 +290,27 @@ def generate(
     platform: str = "general",
     db: Session = Depends(get_db),
 ):
-    content = db.get(Content, content_id)
+    content = db.get(
+        Content,
+        content_id,
+    )
 
     if not content or not content.media_id:
-        raise HTTPException(404, "Content/media not found")
+        raise HTTPException(
+            404,
+            "Content/media not found",
+        )
 
-    media = db.get(Media, content.media_id)
+    media = db.get(
+        Media,
+        content.media_id,
+    )
+
+    if not media:
+        raise HTTPException(
+            404,
+            "Media not found",
+        )
 
     if media.media_type != "video":
         raise HTTPException(
@@ -188,7 +318,20 @@ def generate(
             "AI transcription requires a video",
         )
 
-    result = transcribe(media.path)
+    media_path = _safe_media_path(
+        media.path
+    )
+
+    if not media_path.is_file():
+        raise HTTPException(
+            404,
+            "Media file not found",
+        )
+
+    result = transcribe(
+        str(media_path)
+    )
+
     generated = generate_metadata(
         result["text"],
         platform,
@@ -206,14 +349,22 @@ def generate(
     ).delete()
 
     for word in result["words"]:
-        start_ms = int(word["start"] * 1000)
-        end_ms = int(word["end"] * 1000)
+        start_ms = int(
+            word["start"] * 1000
+        )
+
+        end_ms = int(
+            word["end"] * 1000
+        )
 
         db.add(
             Caption(
                 content_id=content.id,
                 start_ms=start_ms,
-                end_ms=max(end_ms, start_ms + 50),
+                end_ms=max(
+                    end_ms,
+                    start_ms + 50,
+                ),
                 text=word["word"].strip(),
             )
         )
@@ -234,7 +385,10 @@ def translate(
     target: str = "en",
     db: Session = Depends(get_db),
 ):
-    content = db.get(Content, content_id)
+    content = db.get(
+        Content,
+        content_id,
+    )
 
     if not content or not content.transcript:
         raise HTTPException(
@@ -242,7 +396,18 @@ def translate(
             "Generate transcript first",
         )
 
-    source = content.source_language or "en"
+    target = target.strip()
+
+    if not target:
+        raise HTTPException(
+            400,
+            "Target language is required",
+        )
+
+    source = (
+        content.source_language
+        or "en"
+    )
 
     translated = translate_text(
         content.transcript,
@@ -272,17 +437,37 @@ def voice(
     payload: VoiceRequest,
     db: Session = Depends(get_db),
 ):
-    content = db.get(Content, payload.content_id)
+    content = db.get(
+        Content,
+        payload.content_id,
+    )
 
     if not content:
-        raise HTTPException(404, "Content not found")
+        raise HTTPException(
+            404,
+            "Content not found",
+        )
+
+    if not payload.text.strip():
+        raise HTTPException(
+            400,
+            "Text is required for voice generation",
+        )
 
     voice_map = {
         voice["voice_id"]: voice
         for voice in list_voices()
     }
 
-    chosen = voice_map.get(payload.voice_id or "")
+    chosen = voice_map.get(
+        payload.voice_id or ""
+    )
+
+    if payload.voice_id and not chosen:
+        raise HTTPException(
+            404,
+            "Voice not found",
+        )
 
     model = (
         chosen["model_path"]
@@ -291,7 +476,7 @@ def voice(
     )
 
     output = (
-        Path(settings.media_dir)
+        MEDIA_ROOT
         / f"voice_{content.id}_{uuid4().hex[:8]}.wav"
     )
 
@@ -320,9 +505,20 @@ def get_captions(
     content_id: int,
     db: Session = Depends(get_db),
 ):
+    if not db.get(
+        Content,
+        content_id,
+    ):
+        raise HTTPException(
+            404,
+            "Content not found",
+        )
+
     return (
         db.query(Caption)
-        .filter(Caption.content_id == content_id)
+        .filter(
+            Caption.content_id == content_id
+        )
         .order_by(Caption.start_ms)
         .all()
     )
@@ -334,8 +530,21 @@ def save_captions(
     payload: CaptionSaveRequest,
     db: Session = Depends(get_db),
 ):
-    if not db.get(Content, content_id):
-        raise HTTPException(404, "Content not found")
+    if not db.get(
+        Content,
+        content_id,
+    ):
+        raise HTTPException(
+            404,
+            "Content not found",
+        )
+
+    for caption in payload.captions:
+        if caption.end_ms <= caption.start_ms:
+            raise HTTPException(
+                400,
+                "Caption end time must be greater than start time",
+            )
 
     db.query(Caption).filter(
         Caption.content_id == content_id
@@ -352,7 +561,9 @@ def save_captions(
     db.commit()
 
     return {
-        "saved": len(payload.captions)
+        "saved": len(
+            payload.captions
+        )
     }
 
 
@@ -362,7 +573,10 @@ def render_content(
     payload: RenderRequest,
     db: Session = Depends(get_db),
 ):
-    content = db.get(Content, content_id)
+    content = db.get(
+        Content,
+        content_id,
+    )
 
     if not content or not content.media_id:
         raise HTTPException(
@@ -370,33 +584,69 @@ def render_content(
             "Content/media not found",
         )
 
-    media = db.get(Media, content.media_id)
-    current = media.path
+    media = db.get(
+        Media,
+        content.media_id,
+    )
+
+    if not media:
+        raise HTTPException(
+            404,
+            "Media not found",
+        )
+
+    current = _safe_media_path(
+        media.path
+    )
+
+    if not current.is_file():
+        raise HTTPException(
+            404,
+            "Original media file not found",
+        )
 
     if payload.use_voiceover:
+        if media.media_type != "video":
+            raise HTTPException(
+                400,
+                "Voice-over rendering currently requires video media",
+            )
+
         if not content.voice_path:
             raise HTTPException(
                 400,
                 "Generate voice-over first",
             )
 
+        voice_path = _safe_media_path(
+            content.voice_path
+        )
+
+        if not voice_path.is_file():
+            raise HTTPException(
+                404,
+                "Voice-over file not found",
+            )
+
         output = (
-            Path(settings.media_dir)
+            MEDIA_ROOT
             / f"render_{content.id}_audio.mp4"
         )
 
         replace_audio(
-            current,
-            content.voice_path,
+            str(current),
+            str(voice_path),
             str(output),
         )
 
-        current = str(output)
+        current = output
 
     if payload.burn_subtitles:
         captions = (
             db.query(Caption)
-            .filter(Caption.content_id == content.id)
+            .filter(
+                Caption.content_id == content.id
+            )
             .order_by(Caption.start_ms)
             .all()
         )
@@ -408,7 +658,7 @@ def render_content(
             )
 
         srt = (
-            Path(settings.media_dir)
+            MEDIA_ROOT
             / f"captions_{content.id}.srt"
         )
 
@@ -418,28 +668,79 @@ def render_content(
         )
 
         output = (
-            Path(settings.media_dir)
+            MEDIA_ROOT
             / f"render_{content.id}_final.mp4"
         )
 
         burn_subtitles(
-            current,
+            str(current),
             str(srt),
             str(output),
             payload.subtitle_font_size,
         )
 
-        current = str(output)
+        current = output
 
-    content.rendered_media_path = current
+    if not current.is_file():
+        raise HTTPException(
+            500,
+            "Rendered media file was not created",
+        )
+
+    content.rendered_media_path = str(
+        current
+    )
+
     content.status = "READY"
 
     db.commit()
 
     return {
-        "path": current,
+        "path": str(current),
         "status": content.status,
+        "preview_url": (
+            f"/api/content/{content.id}/rendered-media"
+        ),
     }
+
+
+@app.get("/api/content/{content_id}/rendered-media")
+def get_rendered_media(
+    content_id: int,
+    db: Session = Depends(get_db),
+):
+    content = db.get(
+        Content,
+        content_id,
+    )
+
+    if not content:
+        raise HTTPException(
+            404,
+            "Content not found",
+        )
+
+    if not content.rendered_media_path:
+        raise HTTPException(
+            404,
+            "Rendered media not available",
+        )
+
+    path = _safe_media_path(
+        content.rendered_media_path
+    )
+
+    if not path.is_file():
+        raise HTTPException(
+            404,
+            "Rendered media file not found",
+        )
+
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=path.name,
+    )
 
 
 @app.post("/api/schedule")
@@ -457,17 +758,26 @@ def schedule(
             "Unsupported platform",
         )
 
-    if not db.get(Content, payload.content_id):
+    content = db.get(
+        Content,
+        payload.content_id,
+    )
+
+    if not content:
         raise HTTPException(
             404,
             "Content not found",
         )
 
-    publish_at = payload.publish_at.replace(
-        tzinfo=None
+    publish_at = _utc_naive(
+        payload.publish_at
     )
 
-    if publish_at <= datetime.utcnow():
+    now = datetime.now(
+        timezone.utc
+    ).replace(tzinfo=None)
+
+    if publish_at <= now:
         raise HTTPException(
             400,
             "Schedule time must be in the future",
@@ -488,8 +798,14 @@ def schedule(
 
 
 @app.get("/api/jobs")
-def jobs(db: Session = Depends(get_db)):
-    return db.query(Job).order_by(Job.id.desc()).all()
+def jobs(
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(Job)
+        .order_by(Job.id.desc())
+        .all()
+    )
 
 
 @app.post("/api/jobs/{job_id}/retry")
@@ -497,7 +813,10 @@ def retry_job(
     job_id: int,
     db: Session = Depends(get_db),
 ):
-    job = db.get(Job, job_id)
+    job = db.get(
+        Job,
+        job_id,
+    )
 
     if not job:
         raise HTTPException(
@@ -507,7 +826,9 @@ def retry_job(
 
     job.status = "QUEUED"
     job.error = ""
-    job.publish_at = datetime.utcnow()
+    job.publish_at = datetime.now(
+        timezone.utc
+    ).replace(tzinfo=None)
 
     db.commit()
 
@@ -519,7 +840,10 @@ def delete_job(
     job_id: int,
     db: Session = Depends(get_db),
 ):
-    job = db.get(Job, job_id)
+    job = db.get(
+        Job,
+        job_id,
+    )
 
     if not job:
         raise HTTPException(
@@ -536,7 +860,9 @@ def delete_job(
 
 
 @app.get("/api/accounts")
-def accounts(db: Session = Depends(get_db)):
+def accounts(
+    db: Session = Depends(get_db),
+):
     return (
         db.query(PlatformAccount)
         .order_by(PlatformAccount.id)
