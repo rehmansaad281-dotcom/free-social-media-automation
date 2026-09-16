@@ -1,0 +1,66 @@
+name: Build and Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python 3.11 Build and Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Compile Python source
+        run: |
+          python -m compileall backend
+
+      - name: Verify application import
+        run: |
+          python -c "from backend.app.main import app; print('Application import OK')"
+
+      - name: Build deployment package
+        run: |
+          mkdir -p build-package
+          cp -r backend build-package/
+          cp -r frontend build-package/
+          cp -r docs build-package/
+          cp -r scripts build-package/
+          cp README.md build-package/
+          cp .env.example build-package/
+          cp .gitignore build-package/
+
+      - name: Upload deployment package
+        uses: actions/upload-artifact@v7
+        with:
+          name: free-social-media-automation
+          path: build-package
+          if-no-files-found: error
+          retention-days: 7
