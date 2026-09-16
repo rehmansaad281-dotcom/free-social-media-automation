@@ -1,25 +1,1020 @@
-<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Free Social Automation</title><style>
-body{font-family:system-ui;margin:0;background:#0b0d10;color:#eee}main{max-width:1100px;margin:auto;padding:20px}.card{background:#15191f;border:1px solid #2a3038;border-radius:16px;padding:18px;margin:14px 0}h1{margin-bottom:4px}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}input,textarea,select,button{font:inherit;width:100%;box-sizing:border-box;margin:5px 0;padding:11px;border-radius:9px;border:1px solid #39414c;background:#0d1014;color:#fff}textarea{min-height:100px}button{cursor:pointer;background:#2563eb;border:0}.muted{color:#9ca3af}.row{display:flex;gap:8px}.row>*{flex:1}pre{white-space:pre-wrap;overflow:auto;max-height:320px}.job{padding:10px;border:1px solid #303640;border-radius:10px;margin:8px 0}@media(max-width:700px){.grid{grid-template-columns:1fr}.row{flex-direction:column}}
-</style></head><body><main><h1>Free Social Automation</h1><div class="muted">Private • local AI • official platform APIs • no billing system</div>
-<div class="card"><h2>1. Upload media</h2><input id="file" type="file" accept="video/*,image/*"><button onclick="upload()">Upload</button><pre id="uploadResult"></pre></div>
-<div class="card"><h2>2. Content</h2><div class="grid"><input id="mediaId" type="number" placeholder="Media ID"><input id="target" value="en" placeholder="Target language"></div><input id="title" placeholder="Title"><textarea id="description" placeholder="Description"></textarea><input id="hashtags" placeholder="#hashtags"><input id="keywords" placeholder="keywords"><button onclick="createContent()">Save Draft</button><pre id="contentResult"></pre></div>
-<div class="card"><h2>3. AI metadata + captions</h2><div class="row"><input id="contentId" type="number" placeholder="Content ID"><select id="platform"><option>general</option><option>facebook</option><option>youtube</option><option>tiktok</option></select></div><button onclick="generate()">Generate Transcript + AI Metadata + Word Captions</button><pre id="aiResult"></pre></div>
-<div class="card"><h2>4. Translation</h2><div class="row"><input id="translateId" type="number" placeholder="Content ID"><select id="lang"><option value="en">English</option><option value="ur">Urdu</option></select></div><button onclick="translateText()">Translate</button><pre id="translationResult"></pre></div>
-<div class="card"><h2>5. Voice-over</h2><div class="row"><input id="voiceContent" type="number" placeholder="Content ID"><select id="voice"><option value="">Default voice</option></select></div><textarea id="voiceText" placeholder="Use translated text or custom script"></textarea><button onclick="makeVoice()">Generate Voice-over</button><pre id="voiceResult"></pre></div>
-<div class="card"><h2>6. Render</h2><div class="grid"><input id="renderContent" type="number" placeholder="Content ID"><select id="burn"><option value="false">No burned subtitles</option><option value="true">Burn subtitles</option></select></div><button onclick="render()">Create Final Video</button><pre id="renderResult"></pre></div>
-<div class="card"><h2>7. Schedule / Queue</h2><div class="grid"><input id="scheduleContent" type="number" placeholder="Content ID"><select id="schedulePlatform"><option>facebook</option><option>youtube</option><option>tiktok</option></select><input id="scheduleTime" type="datetime-local"><input id="attempts" type="number" value="3" min="1" max="10"></div><button onclick="schedule()">Schedule</button><pre id="scheduleResult"></pre></div>
-<div class="card"><h2>8. Publishing history</h2><button onclick="loadJobs()">Refresh Jobs</button><div id="jobs"></div></div>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Free Social Automation</title>
+
+<style>
+*{box-sizing:border-box}
+body{
+    margin:0;
+    font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    background:#0b0d10;
+    color:#f3f4f6;
+}
+main{
+    width:min(1100px,100%);
+    margin:auto;
+    padding:18px;
+}
+h1{margin:0 0 4px}
+h2{margin:0 0 14px;font-size:19px}
+h3{margin:0 0 10px;font-size:16px}
+.muted{color:#9ca3af;font-size:14px}
+.card{
+    background:#15191f;
+    border:1px solid #2a3038;
+    border-radius:16px;
+    padding:18px;
+    margin:14px 0;
+}
+.grid{
+    display:grid;
+    grid-template-columns:repeat(2,1fr);
+    gap:10px;
+}
+.row{
+    display:flex;
+    gap:10px;
+}
+.row>*{flex:1}
+input,textarea,select,button{
+    width:100%;
+    font:inherit;
+    margin:5px 0;
+    padding:11px;
+    border-radius:9px;
+    border:1px solid #39414c;
+    background:#0d1014;
+    color:#fff;
+}
+textarea{min-height:100px;resize:vertical}
+button{
+    cursor:pointer;
+    background:#2563eb;
+    border:0;
+    font-weight:600;
+}
+button.secondary{background:#374151}
+button.danger{background:#991b1b}
+button:disabled{
+    opacity:.5;
+    cursor:not-allowed;
+}
+pre{
+    white-space:pre-wrap;
+    overflow:auto;
+    max-height:320px;
+    color:#d1d5db;
+}
+video{
+    width:100%;
+    max-height:520px;
+    background:#000;
+    border-radius:12px;
+}
+.preview-wrap{
+    background:#090b0e;
+    border:1px solid #303640;
+    border-radius:12px;
+    padding:10px;
+}
+.caption-list{
+    max-height:420px;
+    overflow:auto;
+}
+.caption-row{
+    display:grid;
+    grid-template-columns:100px 100px 1fr 70px;
+    gap:7px;
+    align-items:center;
+    border-bottom:1px solid #292f37;
+    padding:7px 0;
+}
+.caption-row input{
+    margin:0;
+    padding:8px;
+}
+.caption-row button{
+    margin:0;
+    padding:8px;
+}
+.job{
+    padding:12px;
+    border:1px solid #303640;
+    border-radius:10px;
+    margin:8px 0;
+}
+.status{
+    display:inline-block;
+    padding:3px 8px;
+    border-radius:999px;
+    background:#374151;
+    font-size:12px;
+}
+.success{color:#86efac}
+.error{color:#fca5a5}
+.section-number{
+    color:#60a5fa;
+}
+.actions{
+    display:flex;
+    gap:8px;
+    flex-wrap:wrap;
+}
+.actions button{
+    width:auto;
+    min-width:120px;
+}
+hr{
+    border:0;
+    border-top:1px solid #292f37;
+    margin:18px 0;
+}
+
+@media(max-width:700px){
+    main{padding:10px}
+    .grid{grid-template-columns:1fr}
+    .row{flex-direction:column;gap:0}
+    .caption-row{
+        grid-template-columns:1fr 1fr;
+    }
+    .caption-row input:nth-child(3){
+        grid-column:1 / -1;
+    }
+    .caption-row button{
+        grid-column:1 / -1;
+    }
+}
+</style>
+</head>
+
+<body>
+<main>
+
+<h1>Free Social Automation</h1>
+<div class="muted">
+Private • local AI • official platform APIs • no billing system
+</div>
+
+<!-- 1 -->
+<div class="card">
+<h2><span class="section-number">1.</span> Upload Media</h2>
+
+<input id="file" type="file" accept="video/*,image/*">
+
+<div class="actions">
+<button onclick="upload()">Upload</button>
+<button class="secondary" onclick="loadMedia()">Refresh Media</button>
+</div>
+
+<pre id="uploadResult"></pre>
+
+<div id="mediaPreview" class="preview-wrap" style="display:none">
+<h3>Preview</h3>
+<video id="sourceVideo" controls playsinline></video>
+</div>
+
+<div id="mediaList"></div>
+</div>
+
+<!-- 2 -->
+<div class="card">
+<h2><span class="section-number">2.</span> Content</h2>
+
+<div class="grid">
+<input id="mediaId" type="number" placeholder="Media ID">
+<input id="target" value="en" placeholder="Target language">
+</div>
+
+<input id="title" placeholder="Title">
+
+<textarea id="description" placeholder="Description"></textarea>
+
+<input id="hashtags" placeholder="#hashtags">
+
+<input id="keywords" placeholder="keywords">
+
+<div class="actions">
+<button onclick="createContent()">Save Draft</button>
+<button class="secondary" onclick="loadContent()">Load Content</button>
+</div>
+
+<pre id="contentResult"></pre>
+</div>
+
+<!-- 3 -->
+<div class="card">
+<h2><span class="section-number">3.</span> AI Metadata + Word Captions</h2>
+
+<div class="row">
+<input id="contentId" type="number" placeholder="Content ID">
+
+<select id="platform">
+<option value="general">General</option>
+<option value="facebook">Facebook</option>
+<option value="youtube">YouTube</option>
+<option value="tiktok">TikTok</option>
+</select>
+</div>
+
+<button onclick="generate()">Generate Transcript + AI Metadata + Word Captions</button>
+
+<pre id="aiResult"></pre>
+</div>
+
+<!-- 4 -->
+<div class="card">
+<h2><span class="section-number">4.</span> Caption Editor</h2>
+
+<div class="row">
+<input id="captionContent" type="number" placeholder="Content ID">
+
+<button onclick="loadCaptions()">Load Captions</button>
+</div>
+
+<div id="captionEditor" class="caption-list">
+<div class="muted">No captions loaded.</div>
+</div>
+
+<div class="actions">
+<button onclick="saveCaptions()">Save Caption Changes</button>
+<button class="secondary" onclick="addCaption()">Add Caption</button>
+</div>
+
+<pre id="captionResult"></pre>
+</div>
+
+<!-- 5 -->
+<div class="card">
+<h2><span class="section-number">5.</span> Translation</h2>
+
+<div class="row">
+<input id="translateId" type="number" placeholder="Content ID">
+
+<select id="lang">
+<option value="en">English</option>
+<option value="ur">Urdu</option>
+</select>
+</div>
+
+<button onclick="translateText()">Translate</button>
+
+<pre id="translationResult"></pre>
+</div>
+
+<!-- 6 -->
+<div class="card">
+<h2><span class="section-number">6.</span> Voice-over</h2>
+
+<div class="grid">
+<input id="voiceContent" type="number" placeholder="Content ID">
+
+<select id="voice">
+<option value="">Default voice</option>
+</select>
+</div>
+
+<textarea id="voiceText" placeholder="Use translated text or custom script"></textarea>
+
+<div class="actions">
+<button onclick="makeVoice()">Generate Voice-over</button>
+<button class="secondary" onclick="loadVoices()">Refresh Voices</button>
+</div>
+
+<pre id="voiceResult"></pre>
+</div>
+
+<!-- 7 -->
+<div class="card">
+<h2><span class="section-number">7.</span> Render Final Video</h2>
+
+<input id="renderContent" type="number" placeholder="Content ID">
+
+<div class="grid">
+<select id="useVoice">
+<option value="true">Use voice-over</option>
+<option value="false">Original audio</option>
+</select>
+
+<select id="burn">
+<option value="false">No burned subtitles</option>
+<option value="true">Burn word captions</option>
+</select>
+</div>
+
+<label class="muted">Subtitle font size</label>
+<input id="subtitleSize" type="number" min="12" max="120" value="48">
+
+<button onclick="render()">Create Final Video</button>
+
+<pre id="renderResult"></pre>
+
+<div id="finalPreview" class="preview-wrap" style="display:none">
+<h3>Final Video</h3>
+<video id="finalVideo" controls playsinline></video>
+</div>
+</div>
+
+<!-- 8 -->
+<div class="card">
+<h2><span class="section-number">8.</span> Schedule / Queue</h2>
+
+<div class="grid">
+<input id="scheduleContent" type="number" placeholder="Content ID">
+
+<select id="schedulePlatform">
+<option value="facebook">Facebook</option>
+<option value="youtube">YouTube</option>
+<option value="tiktok">TikTok</option>
+</select>
+
+<input id="scheduleTime" type="datetime-local">
+
+<input id="attempts" type="number" value="3" min="1" max="10">
+</div>
+
+<button onclick="schedule()">Schedule</button>
+
+<pre id="scheduleResult"></pre>
+</div>
+
+<!-- 9 -->
+<div class="card">
+<h2><span class="section-number">9.</span> Publishing History</h2>
+
+<button onclick="loadJobs()">Refresh Jobs</button>
+
+<div id="jobs"></div>
+</div>
+
 <script>
-const $=id=>document.getElementById(id); async function req(url,opt){const r=await fetch(url,opt);const d=await r.json();if(!r.ok)throw Error(d.detail||JSON.stringify(d));return d}
-async function upload(){try{const f=$('file').files[0];if(!f)return;const fd=new FormData();fd.append('file',f);const d=await req('/api/media',{method:'POST',body:fd});$('mediaId').value=d.id;$('uploadResult').textContent=JSON.stringify(d,null,2)}catch(e){$('uploadResult').textContent=e}}
-async function createContent(){try{const d=await req('/api/content',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({media_id:Number($('mediaId').value)||null,title:$('title').value,description:$('description').value,hashtags:$('hashtags').value,keywords:$('keywords').value,target_language:$('target').value||'en'})});['contentId','translateId','voiceContent','renderContent','scheduleContent'].forEach(x=>$(x).value=d.id);$('contentResult').textContent=JSON.stringify(d,null,2)}catch(e){$('contentResult').textContent=e}}
-async function generate(){try{$('aiResult').textContent=JSON.stringify(await req(`/api/content/${$('contentId').value}/generate?platform=${$('platform').value}`,{method:'POST'}),null,2)}catch(e){$('aiResult').textContent=e}}
-async function translateText(){try{const d=await req(`/api/content/${$('translateId').value}/translate?target=${$('lang').value}`,{method:'POST'});$('voiceText').value=d.translated_text;$('translationResult').textContent=JSON.stringify(d,null,2)}catch(e){$('translationResult').textContent=e}}
-async function loadVoices(){try{const vs=await req('/api/voices');$('voice').innerHTML='<option value="">Default voice</option>'+vs.map(v=>`<option value="${v.voice_id}">${v.name} — ${v.gender}</option>`).join('')}catch(e){}}
-async function makeVoice(){try{const d=await req('/api/voice',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content_id:Number($('voiceContent').value),text:$('voiceText').value,voice_id:$('voice').value||null})});$('voiceResult').textContent=JSON.stringify(d,null,2)}catch(e){$('voiceResult').textContent=e}}
-async function render(){try{const d=await req(`/api/content/${$('renderContent').value}/render`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content_id:Number($('renderContent').value),use_voiceover:true,burn_subtitles:$('burn').value==='true'})});$('renderResult').textContent=JSON.stringify(d,null,2)}catch(e){$('renderResult').textContent=e}}
-async function schedule(){try{const d=await req('/api/schedule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content_id:Number($('scheduleContent').value),platform:$('schedulePlatform').value,publish_at:new Date($('scheduleTime').value).toISOString(),max_attempts:Number($('attempts').value)||3})});$('scheduleResult').textContent=JSON.stringify(d,null,2);loadJobs()}catch(e){$('scheduleResult').textContent=e}}
-async function loadJobs(){try{const js=await req('/api/jobs');$('jobs').innerHTML=js.map(j=>`<div class="job"><b>#${j.id} ${j.platform}</b> — ${j.status}<br>Publish: ${j.publish_at}<br>Attempts: ${j.attempts}/${j.max_attempts}<br>${j.error?`Error: ${j.error}<br>`:''}<button onclick="retryJob(${j.id})">Retry now</button></div>`).join('')}catch(e){$('jobs').textContent=e}}
-async function retryJob(id){try{await req(`/api/jobs/${id}/retry`,{method:'POST'});loadJobs()}catch(e){alert(e)}}
-loadVoices();loadJobs();
-</script></main></body></html>
+const $ = id => document.getElementById(id);
+
+async function req(url, options = {}) {
+    const response = await fetch(url, options);
+
+    let data;
+
+    try {
+        data = await response.json();
+    } catch {
+        throw Error(`HTTP ${response.status}`);
+    }
+
+    if (!response.ok) {
+        throw Error(data.detail || JSON.stringify(data));
+    }
+
+    return data;
+}
+
+function setContentId(id) {
+    [
+        "contentId",
+        "captionContent",
+        "translateId",
+        "voiceContent",
+        "renderContent",
+        "scheduleContent"
+    ].forEach(field => {
+        $(field).value = id;
+    });
+}
+
+function showVideoPreview(mediaId) {
+    if (!mediaId) return;
+
+    $("sourceVideo").src = `/api/media/${mediaId}`;
+    $("mediaPreview").style.display = "block";
+}
+
+async function upload() {
+    try {
+        const file = $("file").files[0];
+
+        if (!file) {
+            throw Error("Select a video or image first.");
+        }
+
+        const form = new FormData();
+        form.append("file", file);
+
+        const data = await req("/api/media", {
+            method: "POST",
+            body: form
+        });
+
+        $("mediaId").value = data.id;
+
+        $("uploadResult").textContent =
+            JSON.stringify(data, null, 2);
+
+        if (data.media_type === "video") {
+            showVideoPreview(data.id);
+        }
+
+        loadMedia();
+
+    } catch (error) {
+        $("uploadResult").textContent = error.message;
+    }
+}
+
+async function loadMedia() {
+    try {
+        const media = await req("/api/media");
+
+        if (!media.length) {
+            $("mediaList").innerHTML =
+                '<div class="muted">No media uploaded.</div>';
+            return;
+        }
+
+        $("mediaList").innerHTML = media.map(item => `
+            <div class="job">
+                <b>#${item.id}</b> ${escapeHtml(item.filename)}
+                <br>
+                Type: ${escapeHtml(item.media_type)}
+                <br>
+                <button onclick="selectMedia(${item.id}, '${item.media_type}')">
+                    Select
+                </button>
+            </div>
+        `).join("");
+
+    } catch (error) {
+        $("mediaList").textContent = error.message;
+    }
+}
+
+function selectMedia(id, type) {
+    $("mediaId").value = id;
+
+    if (type === "video") {
+        showVideoPreview(id);
+    }
+}
+
+async function createContent() {
+    try {
+        const data = await req("/api/content", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                media_id: Number($("mediaId").value) || null,
+                title: $("title").value,
+                description: $("description").value,
+                hashtags: $("hashtags").value,
+                keywords: $("keywords").value,
+                target_language: $("target").value || "en"
+            })
+        });
+
+        setContentId(data.id);
+
+        $("contentResult").textContent =
+            JSON.stringify(data, null, 2);
+
+    } catch (error) {
+        $("contentResult").textContent = error.message;
+    }
+}
+
+async function loadContent() {
+    try {
+        const id = Number($("contentId").value);
+
+        if (!id) {
+            throw Error("Enter Content ID.");
+        }
+
+        const items = await req("/api/content");
+
+        const content = items.find(item => item.id === id);
+
+        if (!content) {
+            throw Error("Content not found.");
+        }
+
+        $("mediaId").value = content.media_id || "";
+        $("target").value = content.target_language || "en";
+        $("title").value = content.title || "";
+        $("description").value = content.description || "";
+        $("hashtags").value = content.hashtags || "";
+        $("keywords").value = content.keywords || "";
+
+        if (content.media_id) {
+            showVideoPreview(content.media_id);
+        }
+
+        $("contentResult").textContent =
+            JSON.stringify(content, null, 2);
+
+    } catch (error) {
+        $("contentResult").textContent = error.message;
+    }
+}
+
+async function generate() {
+    try {
+        const id = Number($("contentId").value);
+
+        if (!id) {
+            throw Error("Enter Content ID.");
+        }
+
+        const data = await req(
+            `/api/content/${id}/generate?platform=${encodeURIComponent($("platform").value)}`,
+            {
+                method: "POST"
+            }
+        );
+
+        setContentId(id);
+
+        $("aiResult").textContent =
+            JSON.stringify(data, null, 2);
+
+        await loadCaptions();
+
+    } catch (error) {
+        $("aiResult").textContent = error.message;
+    }
+}
+
+async function translateText() {
+    try {
+        const id = Number($("translateId").value);
+
+        if (!id) {
+            throw Error("Enter Content ID.");
+        }
+
+        const data = await req(
+            `/api/content/${id}/translate?target=${encodeURIComponent($("lang").value)}`,
+            {
+                method: "POST"
+            }
+        );
+
+        $("voiceText").value =
+            data.translated_text || "";
+
+        $("translationResult").textContent =
+            JSON.stringify(data, null, 2);
+
+    } catch (error) {
+        $("translationResult").textContent = error.message;
+    }
+}
+
+async function loadVoices() {
+    try {
+        const voices = await req("/api/voices");
+
+        $("voice").innerHTML =
+            '<option value="">Default voice</option>' +
+            voices.map(voice => `
+                <option value="${escapeAttribute(voice.voice_id)}">
+                    ${escapeHtml(voice.name)} — ${escapeHtml(voice.gender)}
+                </option>
+            `).join("");
+
+    } catch (error) {
+        $("voiceResult").textContent = error.message;
+    }
+}
+
+async function makeVoice() {
+    try {
+        const id = Number($("voiceContent").value);
+
+        if (!id) {
+            throw Error("Enter Content ID.");
+        }
+
+        const text = $("voiceText").value.trim();
+
+        if (!text) {
+            throw Error("Enter voice-over text.");
+        }
+
+        const data = await req("/api/voice", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                content_id: id,
+                text: text,
+                voice_id: $("voice").value || null
+            })
+        });
+
+        $("voiceResult").textContent =
+            JSON.stringify(data, null, 2);
+
+    } catch (error) {
+        $("voiceResult").textContent = error.message;
+    }
+}
+
+async function loadCaptions() {
+    try {
+        const id = Number($("captionContent").value);
+
+        if (!id) {
+            throw Error("Enter Content ID.");
+        }
+
+        const captions =
+            await req(`/api/content/${id}/captions`);
+
+        renderCaptionEditor(captions);
+
+        $("captionResult").textContent =
+            `Loaded ${captions.length} captions.`;
+
+    } catch (error) {
+        $("captionResult").textContent = error.message;
+    }
+}
+
+function renderCaptionEditor(captions) {
+    if (!captions.length) {
+        $("captionEditor").innerHTML =
+            '<div class="muted">No captions available.</div>';
+        return;
+    }
+
+    $("captionEditor").innerHTML =
+        captions.map((caption, index) => `
+            <div class="caption-row" data-index="${index}">
+                <input
+                    type="number"
+                    min="0"
+                    value="${caption.start_ms}"
+                    class="caption-start"
+                    placeholder="Start ms"
+                >
+
+                <input
+                    type="number"
+                    min="1"
+                    value="${caption.end_ms}"
+                    class="caption-end"
+                    placeholder="End ms"
+                >
+
+                <input
+                    type="text"
+                    value="${escapeAttribute(caption.text)}"
+                    class="caption-text"
+                    placeholder="Caption text"
+                >
+
+                <button
+                    class="danger"
+                    onclick="removeCaption(${index})"
+                >
+                    Delete
+                </button>
+            </div>
+        `).join("");
+}
+
+function getCaptionRows() {
+    return [...document.querySelectorAll(".caption-row")];
+}
+
+function getCaptionData() {
+    return getCaptionRows().map(row => ({
+        start_ms: Number(
+            row.querySelector(".caption-start").value
+        ),
+        end_ms: Number(
+            row.querySelector(".caption-end").value
+        ),
+        text: row.querySelector(".caption-text").value
+    }));
+}
+
+function removeCaption(index) {
+    const rows = getCaptionRows();
+
+    if (!rows[index]) return;
+
+    rows[index].remove();
+}
+
+function addCaption() {
+    const editor = $("captionEditor");
+
+    if (
+        editor.children.length === 1 &&
+        editor.firstElementChild.classList.contains("muted")
+    ) {
+        editor.innerHTML = "";
+    }
+
+    const row = document.createElement("div");
+
+    row.className = "caption-row";
+
+    row.innerHTML = `
+        <input
+            type="number"
+            min="0"
+            value="0"
+            class="caption-start"
+            placeholder="Start ms"
+        >
+
+        <input
+            type="number"
+            min="1"
+            value="1000"
+            class="caption-end"
+            placeholder="End ms"
+        >
+
+        <input
+            type="text"
+            value=""
+            class="caption-text"
+            placeholder="Caption text"
+        >
+
+        <button
+            class="danger"
+            type="button"
+        >
+            Delete
+        </button>
+    `;
+
+    row.querySelector("button").onclick =
+        () => row.remove();
+
+    editor.appendChild(row);
+}
+
+async function saveCaptions() {
+    try {
+        const id = Number($("captionContent").value);
+
+        if (!id) {
+            throw Error("Enter Content ID.");
+        }
+
+        const captions = getCaptionData();
+
+        for (const caption of captions) {
+            if (
+                caption.start_ms < 0 ||
+                caption.end_ms <= caption.start_ms ||
+                !caption.text.trim()
+            ) {
+                throw Error(
+                    "Each caption needs valid timing and text."
+                );
+            }
+        }
+
+        const data = await req(
+            `/api/content/${id}/captions`,
+            {
+                method: "PUT",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    captions
+                })
+            }
+        );
+
+        $("captionResult").textContent =
+            JSON.stringify(data, null, 2);
+
+    } catch (error) {
+        $("captionResult").textContent = error.message;
+    }
+}
+
+async function render() {
+    try {
+        const id = Number($("renderContent").value);
+
+        if (!id) {
+            throw Error("Enter Content ID.");
+        }
+
+        const data = await req(
+            `/api/content/${id}/render`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    content_id: id,
+                    use_voiceover:
+                        $("useVoice").value === "true",
+                    burn_subtitles:
+                        $("burn").value === "true",
+                    subtitle_font_size:
+                        Number($("subtitleSize").value) || 48
+                })
+            }
+        );
+
+        $("renderResult").textContent =
+            JSON.stringify(data, null, 2);
+
+        if (data.path) {
+            /*
+             * Backend currently returns a filesystem path.
+             * It does not expose rendered files through a
+             * dedicated HTTP route, so do not pretend that
+             * this path is directly browser-accessible.
+             */
+            $("finalPreview").style.display = "none";
+        }
+
+    } catch (error) {
+        $("renderResult").textContent = error.message;
+    }
+}
+
+async function schedule() {
+    try {
+        const id =
+            Number($("scheduleContent").value);
+
+        if (!id) {
+            throw Error("Enter Content ID.");
+        }
+
+        if (!$("scheduleTime").value) {
+            throw Error("Select a future date and time.");
+        }
+
+        const date =
+            new Date($("scheduleTime").value);
+
+        if (Number.isNaN(date.getTime())) {
+            throw Error("Invalid schedule date/time.");
+        }
+
+        const data = await req(
+            "/api/schedule",
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    content_id: id,
+                    platform:
+                        $("schedulePlatform").value,
+                    publish_at:
+                        date.toISOString(),
+                    max_attempts:
+                        Number($("attempts").value) || 3
+                })
+            }
+        );
+
+        $("scheduleResult").textContent =
+            JSON.stringify(data, null, 2);
+
+        await loadJobs();
+
+    } catch (error) {
+        $("scheduleResult").textContent = error.message;
+    }
+}
+
+async function loadJobs() {
+    try {
+        const jobs = await req("/api/jobs");
+
+        if (!jobs.length) {
+            $("jobs").innerHTML =
+                '<div class="muted">No publishing jobs.</div>';
+            return;
+        }
+
+        $("jobs").innerHTML = jobs.map(job => `
+            <div class="job">
+                <b>#${job.id} ${escapeHtml(job.platform)}</b>
+                <span class="status">
+                    ${escapeHtml(job.status)}
+                </span>
+
+                <br>
+                Content: ${job.content_id}
+
+                <br>
+                Publish: ${escapeHtml(job.publish_at)}
+
+                <br>
+                Attempts:
+                ${job.attempts}/${job.max_attempts}
+
+                ${
+                    job.external_id
+                    ? `<br>External ID: ${escapeHtml(job.external_id)}`
+                    : ""
+                }
+
+                ${
+                    job.error
+                    ? `<br><span class="error">Error: ${escapeHtml(job.error)}</span>`
+                    : ""
+                }
+
+                <div class="actions">
+                    <button
+                        onclick="retryJob(${job.id})"
+                    >
+                        Retry now
+                    </button>
+
+                    <button
+                        class="danger"
+                        onclick="deleteJob(${job.id})"
+                    >
+                        Delete
+                    </button>
+                </div>
+            </div>
+        `).join("");
+
+    } catch (error) {
+        $("jobs").textContent = error.message;
+    }
+}
+
+async function retryJob(id) {
+    try {
+        await req(
+            `/api/jobs/${id}/retry`,
+            {
+                method: "POST"
+            }
+        );
+
+        await loadJobs();
+
+    } catch (error) {
+        alert(error.message);
+    }
+}
+
+async function deleteJob(id) {
+    if (!confirm(`Delete job #${id}?`)) {
+        return;
+    }
+
+    try {
+        await req(
+            `/api/jobs/${id}`,
+            {
+                method: "DELETE"
+            }
+        );
+
+        await loadJobs();
+
+    } catch (error) {
+        alert(error.message);
+    }
+}
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
+
+function escapeAttribute(value) {
+    return escapeHtml(value);
+}
+
+loadVoices();
+loadMedia();
+loadJobs();
+</script>
+
+</main>
+</body>
+</html>
