@@ -14,6 +14,12 @@ from .integrations.tiktok import (
 )
 
 
+# YouTube needs the video uploaded before its scheduled
+# publish time. The scheduler therefore starts the upload
+# before the requested publish_at time.
+YOUTUBE_UPLOAD_LEAD_SECONDS = 600
+
+
 scheduler = BackgroundScheduler(
     job_defaults={
         "coalesce": True,
@@ -48,6 +54,34 @@ def _resolve_publish_path(
     return resolved
 
 
+def _youtube_due(job: Job, now: datetime) -> bool:
+    """
+    YouTube uploads must happen before publish_at.
+
+    Example:
+    publish_at = 12:00
+    upload window starts = 11:50
+
+    If the scheduler runs after 11:50, the job can be
+    uploaded with YouTube publishAt=12:00.
+    """
+    upload_start = (
+        job.publish_at
+        - timedelta(
+            seconds=YOUTUBE_UPLOAD_LEAD_SECONDS
+        )
+    )
+
+    return upload_start <= now
+
+
+def _job_is_due(job: Job, now: datetime) -> bool:
+    if job.platform == "youtube":
+        return _youtube_due(job, now)
+
+    return job.publish_at <= now
+
+
 def execute_due_jobs():
     db = SessionLocal()
 
@@ -58,13 +92,17 @@ def execute_due_jobs():
             db.query(Job)
             .filter(
                 Job.status == "QUEUED",
-                Job.publish_at <= now,
             )
-            .order_by(Job.publish_at.asc())
+            .order_by(
+                Job.publish_at.asc()
+            )
             .all()
         )
 
         for job in jobs:
+            if not _job_is_due(job, now):
+                continue
+
             content = db.get(
                 Content,
                 job.content_id,
@@ -127,21 +165,33 @@ def execute_due_jobs():
 
                     if media.media_type != "video":
                         raise RuntimeError(
-                            "YouTube publishing requires video media"
+                            "YouTube publishing requires "
+                            "video media"
                         )
+
+                    # Keep the requested future publish time
+                    # when possible. If the scheduler is late
+                    # enough that publish_at has already passed,
+                    # publish immediately instead of sending an
+                    # invalid past publishAt to YouTube.
+                    youtube_publish_at = job.publish_at
+
+                    if youtube_publish_at <= now:
+                        youtube_publish_at = None
 
                     external = youtube_publish(
                         str(path),
                         content.title,
                         content.description,
                         content.hashtags,
-                        job.publish_at,
+                        youtube_publish_at,
                     )
 
                 elif job.platform == "tiktok":
                     if media.media_type != "video":
                         raise RuntimeError(
-                            "TikTok publishing requires video media"
+                            "TikTok publishing requires "
+                            "video media"
                         )
 
                     external = tiktok_publish(
@@ -157,7 +207,8 @@ def execute_due_jobs():
 
                 if not external:
                     raise RuntimeError(
-                        "Platform did not return an external ID"
+                        "Platform did not return "
+                        "an external ID"
                     )
 
                 job.external_id = str(external)
@@ -230,10 +281,11 @@ def poll_tiktok_jobs():
                 db.commit()
 
             except Exception as exc:
-                # Keep the published job intact if a
-                # temporary status check fails.
+                # Do not change the main publishing state
+                # because a temporary status request failed.
                 job.error = (
-                    f"TikTok status check failed: {exc}"
+                    "TikTok status check failed: "
+                    f"{exc}"
                 )
                 db.commit()
 
