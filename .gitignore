@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+*.db
+*.sqlite3
+media/*
+!media/.gitkeep
+data/*
+!data/.gitkeep
+models/*
+!models/piper/.gitkeep
+secrets/*
+!secrets/.gitkeep
+.idea/
+.vscode/
+.DS_Store
