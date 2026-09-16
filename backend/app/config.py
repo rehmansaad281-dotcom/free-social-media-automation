@@ -9,9 +9,8 @@ class Settings(BaseSettings):
     max_upload_mb: int = 2048
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "llama3.2:3b"
-    whisper_model: str = "small"
-    whisper_device: str = "cpu"
-    whisper_compute_type: str = "int8"
+    whisper_binary: str = "./whisper.cpp/build/bin/whisper-cli"
+whisper_model: str = "./models/whisper/ggml-base.bin"
     piper_bin: str = "piper"
     piper_model: str = "./models/piper/voice.onnx"
     piper_voice_dir: str = "./models/piper"
