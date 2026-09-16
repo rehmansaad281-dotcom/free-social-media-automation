@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+
 class Settings(BaseSettings):
     app_name: str = "Free Social Automation"
     database_url: str = "sqlite:///./data/app.db"
@@ -10,7 +11,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "llama3.2:3b"
     whisper_binary: str = "./whisper.cpp/build/bin/whisper-cli"
-whisper_model: str = "./models/whisper/ggml-base.bin"
+    whisper_model: str = "./models/whisper/ggml-base.bin"
     piper_bin: str = "piper"
     piper_model: str = "./models/piper/voice.onnx"
     piper_voice_dir: str = "./models/piper"
@@ -24,5 +25,6 @@ whisper_model: str = "./models/whisper/ggml-base.bin"
     tiktok_access_token: str = ""
     tiktok_privacy_level: str = "SELF_ONLY"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
 
 settings = Settings()
