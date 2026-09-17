@@ -814,6 +814,10 @@ async function render() {
             throw Error("Enter Content ID.");
         }
 
+        $("finalPreview").style.display = "none";
+        $("finalVideo").removeAttribute("src");
+        $("finalVideo").load();
+
         const data = await req(
             `/api/content/${id}/render`,
             {
@@ -836,14 +840,13 @@ async function render() {
         $("renderResult").textContent =
             JSON.stringify(data, null, 2);
 
-        if (data.path) {
-            /*
-             * Backend currently returns a filesystem path.
-             * It does not expose rendered files through a
-             * dedicated HTTP route, so do not pretend that
-             * this path is directly browser-accessible.
-             */
-            $("finalPreview").style.display = "none";
+        if (data.preview_url) {
+            const previewUrl =
+                `${data.preview_url}?t=${Date.now()}`;
+
+            $("finalVideo").src = previewUrl;
+            $("finalVideo").load();
+            $("finalPreview").style.display = "block";
         }
 
     } catch (error) {
