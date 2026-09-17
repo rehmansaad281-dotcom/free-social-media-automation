@@ -1,7 +1,7 @@
 import subprocess
 from pathlib import Path
 
-from ..config import settings
+from .config import settings
 
 
 def run_ffmpeg(args: list[str]):
