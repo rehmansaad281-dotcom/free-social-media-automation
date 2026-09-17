@@ -155,7 +155,7 @@ def test_youtube_pending_until_public(monkeypatch):
     monkeypatch.setattr(youtube, "get_status", lambda _: {"status": {"uploadStatus": "processed", "privacyStatus": "private", "publishAt": "future"}})
     scheduler.poll_platform_jobs()
     with SessionLocal() as db: assert db.get(Job, jid).status == "UPLOADED"
-    monkeypatch.setattr(youtube, "get_status", lambda _: {"status": {"uploadStatus": "processed", "privacyStatus": "public"}})
+    monkeypatch.setattr(youtube, "get_status", lambda _: {"status": {"uploadStatus": "processed", "privacyStatus": "public", "publishAt": "past"}})
     scheduler.poll_platform_jobs()
     with SessionLocal() as db: assert db.get(Job, jid).status == "PUBLISHED"
 

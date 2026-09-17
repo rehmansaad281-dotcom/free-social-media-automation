@@ -66,3 +66,6 @@ A final review then corrected YouTube privacy scheduling: private/unlisted jobs 
 - `scripts/cleanup_media.py`, `container_smoke.py`: safe offline maintenance and actual container/media acceptance checks.
 - `tests/__init__.py`, `conftest.py`, `test_completion.py`, `test_scheduler_integrations.py`: new and updated regression coverage.
 - `README.md`, `docs/ACCOUNTS.md`, `ARCHITECTURE.md`, `PLATFORM_NOTES.md`, `SETUP_LOCAL_AI.md`, `AUDIT_REPORT.md`, `FOLLOWUP_REPORT.md`: current setup, execution map, historical baseline clarification and evidence.
+
+
+Final privacy-fix commit `12392dd` also passed both GitHub checks in run [35262583277](https://github.com/rehmansaad281-dotcom/free-social-media-automation/actions/runs/35262583277). Follow-up hardening permits a processed/public YouTube result to be recognized even if the API retains its past `publishAt` field, and updates setup-node to its current Node-24 action runtime after GitHub reported the old action-runtime deprecation. Final head check results are attached to PR #1.

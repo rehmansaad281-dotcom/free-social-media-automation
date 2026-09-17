@@ -400,7 +400,7 @@ def poll_platform_jobs():
                         if status.get("uploadStatus") in {"failed", "rejected", "deleted"} or processing in {"failed", "terminated"}:
                             job.status = "FAILED"
                             job.error = "YouTube rejected or failed processing this video. Inspect YouTube Studio."
-                        elif status.get("uploadStatus") == "processed" and not status.get("publishAt"):
+                        elif status.get("uploadStatus") == "processed":
                             # Future scheduled uploads are public on success; late uploads use configured privacy.
                             attempt = job.last_attempt_at or job.created_at
                             expected = options.get("youtube_privacy") or ("public" if job.publish_at > attempt else settings.youtube_default_privacy)

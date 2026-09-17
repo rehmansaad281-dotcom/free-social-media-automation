@@ -48,7 +48,7 @@ jobs:
           python -c "from backend.app.main import app; print('Application import OK')"
 
       - name: Set up Node for frontend syntax validation
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
 
