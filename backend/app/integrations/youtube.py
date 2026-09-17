@@ -10,19 +10,28 @@ from ..config import settings
 
 
 SCOPES = [
-    "https://www.googleapis.com/auth/youtube.upload"
+    "https://www.googleapis.com/auth/youtube.upload",
 ]
 
 
+SUPPORTED_VIDEO_EXTENSIONS = {
+    ".mp4",
+    ".mov",
+    ".m4v",
+    ".avi",
+    ".webm",
+}
+
+
 def _utc_rfc3339(value: datetime) -> str:
-    """
-    Convert a datetime to UTC RFC3339 format required by YouTube.
-    Database datetimes are stored as naive UTC.
-    """
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
+        value = value.replace(
+            tzinfo=timezone.utc
+        )
     else:
-        value = value.astimezone(timezone.utc)
+        value = value.astimezone(
+            timezone.utc
+        )
 
     return (
         value
@@ -33,48 +42,55 @@ def _utc_rfc3339(value: datetime) -> str:
 
 
 def get_service():
-    token = Path(settings.youtube_token_file)
-
-    creds = (
-        Credentials.from_authorized_user_file(
-            str(token),
-            SCOPES,
-        )
-        if token.exists()
-        else None
+    token = Path(
+        settings.youtube_token_file
     )
 
-    if not creds or not creds.valid:
-        if (
-            creds
-            and creds.expired
-            and creds.refresh_token
-        ):
-            from google.auth.transport.requests import Request
+    credentials = None
 
-            creds.refresh(Request())
+    if token.is_file():
+        credentials = (
+            Credentials.from_authorized_user_file(
+                str(token),
+                SCOPES,
+            )
+        )
 
-        else:
-            client_secret = Path(
-                settings.youtube_client_secrets_file
+    if (
+        credentials
+        and credentials.expired
+        and credentials.refresh_token
+    ):
+        from google.auth.transport.requests import (
+            Request,
+        )
+
+        credentials.refresh(
+            Request()
+        )
+
+    if not credentials or not credentials.valid:
+        client_secret = Path(
+            settings.youtube_client_secrets_file
+        )
+
+        if not client_secret.is_file():
+            raise RuntimeError(
+                "YouTube client secret file not found: "
+                f"{client_secret}"
             )
 
-            if not client_secret.is_file():
-                raise RuntimeError(
-                    "YouTube client secret file not found: "
-                    f"{client_secret}"
-                )
-
-            flow = (
-                InstalledAppFlow.from_client_secrets_file(
-                    str(client_secret),
-                    SCOPES,
-                )
+        flow = (
+            InstalledAppFlow
+            .from_client_secrets_file(
+                str(client_secret),
+                SCOPES,
             )
+        )
 
-            creds = flow.run_local_server(
-                port=0
-            )
+        credentials = flow.run_local_server(
+            port=0
+        )
 
         token.parent.mkdir(
             parents=True,
@@ -82,15 +98,35 @@ def get_service():
         )
 
         token.write_text(
-            creds.to_json(),
+            credentials.to_json(),
             encoding="utf-8",
         )
 
     return build(
         "youtube",
         "v3",
-        credentials=creds,
+        credentials=credentials,
     )
+
+
+def _build_tags(
+    hashtags: str,
+) -> list[str]:
+    values = (
+        hashtags
+        .replace(",", " ")
+        .split()
+    )
+
+    tags = []
+
+    for value in values:
+        tag = value.strip("# ")
+
+        if tag:
+            tags.append(tag)
+
+    return tags
 
 
 def publish_video(
@@ -101,70 +137,74 @@ def publish_video(
     publish_at: datetime | None = None,
     privacy: str | None = None,
 ) -> str:
-    path = Path(media_path)
+    path = Path(
+        media_path
+    )
 
     if not path.is_file():
         raise RuntimeError(
             f"YouTube media file not found: {path}"
         )
 
-    if path.suffix.lower() not in {
-        ".mp4",
-        ".mov",
-        ".m4v",
-        ".avi",
-        ".webm",
-    }:
+    if path.suffix.lower() not in (
+        SUPPORTED_VIDEO_EXTENSIONS
+    ):
         raise RuntimeError(
-            "YouTube publishing requires a video file"
+            "YouTube publishing requires "
+            "a supported video file"
         )
 
     youtube = get_service()
-
-    tags = [
-        item.strip("# ")
-        for item in hashtags.replace(",", " ").split()
-        if item.strip("# ")
-    ]
 
     status: dict[str, str] = {
         "privacyStatus": (
             privacy
             or settings.youtube_default_privacy
-        )
+        ),
     }
 
     if publish_at is not None:
-        status["privacyStatus"] = "private"
-        status["publishAt"] = _utc_rfc3339(
-            publish_at
-        )
+        status = {
+            "privacyStatus": "private",
+            "publishAt": _utc_rfc3339(
+                publish_at
+            ),
+        }
 
     body = {
         "snippet": {
-            "title": title[:100],
+            "title": title.strip()[:100],
             "description": (
                 f"{description}\n\n{hashtags}"
-            )[:5000],
-            "tags": tags,
+            ).strip()[:5000],
+            "tags": _build_tags(
+                hashtags
+            ),
             "categoryId": "22",
         },
         "status": status,
     }
 
-    response = (
-        youtube.videos()
-        .insert(
-            part="snippet,status",
-            body=body,
-            media_body=MediaFileUpload(
-                str(path),
-                chunksize=-1,
-                resumable=True,
-            ),
+    try:
+        request = (
+            youtube.videos()
+            .insert(
+                part="snippet,status",
+                body=body,
+                media_body=MediaFileUpload(
+                    str(path),
+                    chunksize=-1,
+                    resumable=True,
+                ),
+            )
         )
-        .execute()
-    )
+
+        response = request.execute()
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"YouTube upload failed: {exc}"
+        ) from exc
 
     video_id = response.get("id")
 
@@ -174,4 +214,4 @@ def publish_video(
             "returning a video ID"
         )
 
-    return video_id
+    return str(video_id)
