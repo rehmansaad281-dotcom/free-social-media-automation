@@ -369,20 +369,20 @@ def generate(
     ).delete()
 
     for word in result["words"]:
-    start_ms = int(word["start_ms"])
-    end_ms = int(word["end_ms"])
+        start_ms = int(word["start_ms"])
+        end_ms = int(word["end_ms"])
 
-    db.add(
-        Caption(
-            content_id=content.id,
-            start_ms=start_ms,
-            end_ms=max(
-                end_ms,
-                start_ms + 50,
-            ),
-            text=word["text"].strip(),
+        db.add(
+            Caption(
+                content_id=content.id,
+                start_ms=start_ms,
+                end_ms=max(
+                    end_ms,
+                    start_ms + 50,
+                ),
+                text=word["text"].strip(),
+            )
         )
-    )
 
     db.commit()
 
