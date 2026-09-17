@@ -1,39 +1,304 @@
 import os
+from pathlib import Path
+
 import httpx
+
 from ..config import settings
+
 
 BASE = "https://open.tiktokapis.com/v2"
 
-def creator_info():
-    r = httpx.post(f"{BASE}/post/publish/creator_info/query/", headers={"Authorization": f"Bearer {settings.tiktok_access_token}", "Content-Type": "application/json"}, timeout=60)
-    r.raise_for_status(); return r.json().get("data", {})
+SUPPORTED_VIDEO_EXTENSIONS = {
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+}
 
-def publish_video(media_path: str, title: str, privacy_level: str | None = None) -> str:
+
+def _headers() -> dict[str, str]:
     if not settings.tiktok_access_token:
-        raise RuntimeError("TikTok access token not configured")
-    info = creator_info()
-    allowed = info.get("privacy_level_options") or [settings.tiktok_privacy_level]
-    privacy = privacy_level or settings.tiktok_privacy_level
-    if privacy not in allowed:
-        privacy = allowed[0]
-    size = os.path.getsize(media_path)
-    chunk = min(size, 10_000_000)
-    total = (size + chunk - 1) // chunk
-    payload = {"post_info": {"title": title[:2200], "privacy_level": privacy, "disable_duet": bool(info.get("duet_disabled", False)), "disable_comment": bool(info.get("comment_disabled", False)), "disable_stitch": bool(info.get("stitch_disabled", False))}, "source_info": {"source": "FILE_UPLOAD", "video_size": size, "chunk_size": chunk, "total_chunk_count": total}}
-    r = httpx.post(f"{BASE}/post/publish/video/init/", headers={"Authorization": f"Bearer {settings.tiktok_access_token}", "Content-Type": "application/json"}, json=payload, timeout=60)
-    r.raise_for_status(); data = r.json().get("data", {})
-    upload_url, publish_id = data.get("upload_url"), data.get("publish_id")
-    if not upload_url or not publish_id: raise RuntimeError(f"TikTok init failed: {r.text}")
-    with open(media_path, "rb") as f:
-        offset = 0
-        while offset < size:
-            body = f.read(chunk)
-            end = offset + len(body) - 1
-            rr = httpx.put(upload_url, headers={"Content-Type": "video/mp4", "Content-Length": str(len(body)), "Content-Range": f"bytes {offset}-{end}/{size}"}, content=body, timeout=900)
-            rr.raise_for_status()
-            offset = end + 1
-    return publish_id
+        raise RuntimeError(
+            "TikTok access token not configured"
+        )
 
-def get_status(publish_id: str) -> dict:
-    r = httpx.post(f"{BASE}/post/publish/status/fetch/", headers={"Authorization": f"Bearer {settings.tiktok_access_token}", "Content-Type": "application/json"}, json={"publish_id": publish_id}, timeout=60)
-    r.raise_for_status(); return r.json().get("data", {})
+    return {
+        "Authorization": (
+            f"Bearer "
+            f"{settings.tiktok_access_token}"
+        ),
+        "Content-Type": "application/json",
+    }
+
+
+def _json_response(
+    response: httpx.Response,
+    action: str,
+) -> dict:
+    try:
+        data = response.json()
+    except ValueError:
+        raise RuntimeError(
+            f"TikTok {action} returned invalid JSON"
+        )
+
+    if not response.is_success:
+        error = data.get("error", {})
+
+        message = (
+            error.get("message")
+            if isinstance(error, dict)
+            else None
+        )
+
+        raise RuntimeError(
+            f"TikTok {action} failed: "
+            f"{message or response.text}"
+        )
+
+    error = data.get("error", {})
+
+    if isinstance(error, dict):
+        code = error.get("code")
+
+        if code and code != "ok":
+            raise RuntimeError(
+                f"TikTok {action} failed: "
+                f"{error.get('message') or code}"
+            )
+
+    return data
+
+
+def creator_info() -> dict:
+    response = httpx.post(
+        f"{BASE}/post/publish/"
+        f"creator_info/query/",
+        headers=_headers(),
+        timeout=60,
+    )
+
+    data = _json_response(
+        response,
+        "creator info request",
+    )
+
+    return data.get(
+        "data",
+        {},
+    )
+
+
+def _select_privacy(
+    info: dict,
+    requested: str | None,
+) -> str:
+    allowed = info.get(
+        "privacy_level_options"
+    ) or []
+
+    privacy = (
+        requested
+        or settings.tiktok_privacy_level
+    )
+
+    if allowed and privacy not in allowed:
+        raise RuntimeError(
+            "Configured TikTok privacy level "
+            f"'{privacy}' is not allowed. "
+            f"Available options: {allowed}"
+        )
+
+    return privacy
+
+
+def publish_video(
+    media_path: str,
+    title: str,
+    privacy_level: str | None = None,
+) -> str:
+    path = Path(
+        media_path
+    )
+
+    if not path.is_file():
+        raise RuntimeError(
+            f"TikTok media file not found: {path}"
+        )
+
+    extension = path.suffix.lower()
+
+    content_type = (
+        SUPPORTED_VIDEO_EXTENSIONS.get(
+            extension
+        )
+    )
+
+    if not content_type:
+        raise RuntimeError(
+            "TikTok publishing requires "
+            "MP4, MOV, or WebM video"
+        )
+
+    info = creator_info()
+
+    privacy = _select_privacy(
+        info,
+        privacy_level,
+    )
+
+    file_size = os.path.getsize(
+        path
+    )
+
+    chunk_size = min(
+        file_size,
+        10_000_000,
+    )
+
+    total_chunks = (
+        file_size + chunk_size - 1
+    ) // chunk_size
+
+    payload = {
+        "post_info": {
+            "title": title[:2200],
+            "privacy_level": privacy,
+            "disable_duet": bool(
+                info.get(
+                    "duet_disabled",
+                    False,
+                )
+            ),
+            "disable_comment": bool(
+                info.get(
+                    "comment_disabled",
+                    False,
+                )
+            ),
+            "disable_stitch": bool(
+                info.get(
+                    "stitch_disabled",
+                    False,
+                )
+            ),
+        },
+        "source_info": {
+            "source": "FILE_UPLOAD",
+            "video_size": file_size,
+            "chunk_size": chunk_size,
+            "total_chunk_count": total_chunks,
+        },
+    }
+
+    response = httpx.post(
+        f"{BASE}/post/publish/"
+        f"video/init/",
+        headers=_headers(),
+        json=payload,
+        timeout=60,
+    )
+
+    data = _json_response(
+        response,
+        "video initialization",
+    )
+
+    result = data.get(
+        "data",
+        {},
+    )
+
+    upload_url = result.get(
+        "upload_url"
+    )
+
+    publish_id = result.get(
+        "publish_id"
+    )
+
+    if not upload_url or not publish_id:
+        raise RuntimeError(
+            "TikTok initialization did not "
+            "return upload_url and publish_id"
+        )
+
+    with path.open("rb") as media:
+        offset = 0
+
+        while offset < file_size:
+            chunk = media.read(
+                chunk_size
+            )
+
+            if not chunk:
+                break
+
+            end = (
+                offset
+                + len(chunk)
+                - 1
+            )
+
+            upload_response = httpx.put(
+                upload_url,
+                headers={
+                    "Content-Type":
+                        content_type,
+                    "Content-Length":
+                        str(len(chunk)),
+                    "Content-Range": (
+                        f"bytes "
+                        f"{offset}-{end}/"
+                        f"{file_size}"
+                    ),
+                },
+                content=chunk,
+                timeout=900,
+            )
+
+            if not upload_response.is_success:
+                raise RuntimeError(
+                    "TikTok video upload failed: "
+                    f"{upload_response.text}"
+                )
+
+            offset = end + 1
+
+    if offset != file_size:
+        raise RuntimeError(
+            "TikTok upload ended before "
+            "the complete file was transferred"
+        )
+
+    return str(
+        publish_id
+    )
+
+
+def get_status(
+    publish_id: str,
+) -> dict:
+    if not publish_id:
+        raise ValueError(
+            "TikTok publish ID is required"
+        )
+
+    response = httpx.post(
+        f"{BASE}/post/publish/"
+        f"status/fetch/",
+        headers=_headers(),
+        json={
+            "publish_id": publish_id,
+        },
+        timeout=60,
+    )
+
+    data = _json_response(
+        response,
+        "publish status request",
+    )
+
+    return data.get(
+        "data",
+        {},
+    )
