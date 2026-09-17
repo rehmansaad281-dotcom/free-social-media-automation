@@ -1,38 +1,224 @@
 import httpx
+
 from ..config import settings
+
 
 class FacebookPublisher:
     def __init__(self):
-        if not settings.facebook_page_id or not settings.facebook_page_access_token:
-            raise RuntimeError("Facebook Page ID/access token not configured")
-        self.base = f"https://graph.facebook.com/{settings.facebook_graph_version}"
-        self.params = {"access_token": settings.facebook_page_access_token}
+        if not settings.facebook_page_id:
+            raise RuntimeError(
+                "Facebook Page ID not configured"
+            )
 
-    def publish_post(self, media_path: str, description: str, hashtags: str) -> str:
-        caption = "\n\n".join(x for x in [description, hashtags] if x)
-        endpoint = "photos" if media_path.lower().endswith((".jpg", ".jpeg", ".png", ".webp")) else "videos"
-        field = "caption" if endpoint == "photos" else "description"
-        with open(media_path, "rb") as f:
-            r = httpx.post(f"{self.base}/{settings.facebook_page_id}/{endpoint}", data={field: caption, **self.params}, files={"source": f}, timeout=900)
-        r.raise_for_status()
-        data = r.json()
-        return str(data.get("id") or data.get("post_id") or "")
+        if not settings.facebook_page_access_token:
+            raise RuntimeError(
+                "Facebook Page access token not configured"
+            )
 
-    def publish_reel(self, media_path: str, description: str, hashtags: str) -> str:
-        # Page Reels use the Graph video_reels upload flow. The endpoint/version and Page permissions
-        # must match the Meta app configuration used by the owner.
-        caption = "\n\n".join(x for x in [description, hashtags] if x)
-        with open(media_path, "rb") as f:
-            init = httpx.post(f"{self.base}/{settings.facebook_page_id}/video_reels", params={**self.params, "upload_phase": "start"}, timeout=60)
-        init.raise_for_status()
-        data = init.json()
-        video_id = data.get("video_id")
+        self.base = (
+            f"https://graph.facebook.com/"
+            f"{settings.facebook_graph_version}"
+        )
+
+        self.params = {
+            "access_token": settings.facebook_page_access_token,
+        }
+
+    @staticmethod
+    def _caption(
+        description: str,
+        hashtags: str,
+    ) -> str:
+        return "\n\n".join(
+            value.strip()
+            for value in (description, hashtags)
+            if value and value.strip()
+        )
+
+    @staticmethod
+    def _raise_for_response(
+        response: httpx.Response,
+        action: str,
+    ) -> dict:
+        try:
+            data = response.json()
+        except ValueError:
+            data = {}
+
+        if not response.is_success:
+            message = (
+                data.get("error", {}).get("message")
+                if isinstance(data, dict)
+                else None
+            )
+
+            raise RuntimeError(
+                f"Facebook {action} failed: "
+                f"{message or response.text}"
+            )
+
+        return data
+
+    def publish_post(
+        self,
+        media_path: str,
+        description: str,
+        hashtags: str,
+    ) -> str:
+        caption = self._caption(
+            description,
+            hashtags,
+        )
+
+        lower_path = media_path.lower()
+
+        if lower_path.endswith(
+            (".jpg", ".jpeg", ".png", ".webp")
+        ):
+            endpoint = "photos"
+            field = "caption"
+        elif lower_path.endswith(
+            (".mp4", ".mov", ".m4v", ".avi", ".webm")
+        ):
+            endpoint = "videos"
+            field = "description"
+        else:
+            raise RuntimeError(
+                "Unsupported Facebook media format"
+            )
+
+        with open(media_path, "rb") as media:
+            response = httpx.post(
+                f"{self.base}/"
+                f"{settings.facebook_page_id}/"
+                f"{endpoint}",
+                data={
+                    field: caption,
+                    **self.params,
+                },
+                files={
+                    "source": media,
+                },
+                timeout=900,
+            )
+
+        data = self._raise_for_response(
+            response,
+            "post",
+        )
+
+        external_id = (
+            data.get("id")
+            or data.get("post_id")
+        )
+
+        if not external_id:
+            raise RuntimeError(
+                "Facebook post completed without "
+                "returning an external ID"
+            )
+
+        return str(external_id)
+
+    def publish_reel(
+        self,
+        media_path: str,
+        description: str,
+        hashtags: str,
+    ) -> str:
+        caption = self._caption(
+            description,
+            hashtags,
+        )
+
+        lower_path = media_path.lower()
+
+        if not lower_path.endswith(
+            (".mp4", ".mov", ".m4v", ".webm")
+        ):
+            raise RuntimeError(
+                "Facebook Reel requires a supported "
+                "video file"
+            )
+
+        init_response = httpx.post(
+            f"{self.base}/"
+            f"{settings.facebook_page_id}/"
+            f"video_reels",
+            params={
+                **self.params,
+                "upload_phase": "start",
+            },
+            timeout=60,
+        )
+
+        init_data = self._raise_for_response(
+            init_response,
+            "Reel initialization",
+        )
+
+        video_id = init_data.get("video_id")
+
         if not video_id:
-            raise RuntimeError(f"Facebook Reel init failed: {data}")
-        size = __import__("os").path.getsize(media_path)
-        with open(media_path, "rb") as f:
-            upload = httpx.post(f"{self.base}/{settings.facebook_page_id}/video_reels", params={**self.params, "upload_phase": "transfer", "video_id": video_id, "start_offset": 0, "end_offset": size}, content=f.read(), headers={"Content-Type": "application/octet-stream"}, timeout=900)
-        upload.raise_for_status()
-        finish = httpx.post(f"{self.base}/{settings.facebook_page_id}/video_reels", params={**self.params, "upload_phase": "finish", "video_id": video_id, "video_state": "PUBLISHED", "description": caption}, timeout=300)
-        finish.raise_for_status()
-        return str(video_id)
+            raise RuntimeError(
+                "Facebook Reel initialization "
+                "did not return a video ID"
+            )
+
+        import os
+
+        file_size = os.path.getsize(
+            media_path
+        )
+
+        with open(media_path, "rb") as media:
+            upload_response = httpx.post(
+                f"{self.base}/"
+                f"{settings.facebook_page_id}/"
+                f"video_reels",
+                params={
+                    **self.params,
+                    "upload_phase": "transfer",
+                    "video_id": video_id,
+                    "start_offset": 0,
+                    "end_offset": file_size,
+                },
+                content=media.read(),
+                headers={
+                    "Content-Type":
+                        "application/octet-stream",
+                },
+                timeout=900,
+            )
+
+        self._raise_for_response(
+            upload_response,
+            "Reel transfer",
+        )
+
+        finish_response = httpx.post(
+            f"{self.base}/"
+            f"{settings.facebook_page_id}/"
+            f"video_reels",
+            params={
+                **self.params,
+                "upload_phase": "finish",
+                "video_id": video_id,
+                "video_state": "PUBLISHED",
+                "description": caption,
+            },
+            timeout=300,
+        )
+
+        finish_data = self._raise_for_response(
+            finish_response,
+            "Reel publishing",
+        )
+
+        external_id = (
+            finish_data.get("video_id")
+            or finish_data.get("id")
+            or video_id
+        )
+
+        return str(external_id)
