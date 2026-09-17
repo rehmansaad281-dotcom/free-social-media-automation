@@ -237,3 +237,19 @@ def test_cleanup_never_removes_referenced_media(monkeypatch):
     source = root / "seed.mp4"; os.utime(source, (1, 1))
     assert old in candidates(7) and source not in candidates(7)
     old.unlink()
+
+
+@pytest.mark.parametrize("privacy", ["private", "unlisted"])
+def test_youtube_nonpublic_schedule_never_uploads_early(privacy):
+    now = datetime.utcnow()
+    job = SimpleNamespace(platform="youtube", publish_at=now + timedelta(minutes=5), retry_at=None,
+                          options_json=json.dumps({"youtube_privacy": privacy}))
+    assert not scheduler._job_is_due(job, now)
+    assert scheduler._job_is_due(job, now + timedelta(minutes=6))
+
+
+def test_youtube_public_schedule_can_upload_early():
+    now = datetime.utcnow()
+    job = SimpleNamespace(platform="youtube", publish_at=now + timedelta(minutes=5), retry_at=None,
+                          options_json=json.dumps({"youtube_privacy": "public"}))
+    assert scheduler._job_is_due(job, now)

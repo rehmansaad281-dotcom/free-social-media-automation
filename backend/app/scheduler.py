@@ -56,6 +56,9 @@ def _youtube_due(
     job: Job,
     now: datetime,
 ) -> bool:
+    options = json.loads(job.options_json or "{}")
+    if options.get("youtube_privacy", "public") != "public":
+        return job.publish_at <= now
     upload_start = (
         job.publish_at
         - timedelta(seconds=YOUTUBE_UPLOAD_LEAD_SECONDS)
@@ -114,6 +117,7 @@ def execute_due_jobs():
         )
 
         for job in jobs:
+            now = _utc_now_naive()
             if not _job_is_due(job, now):
                 continue
 
@@ -194,7 +198,7 @@ def execute_due_jobs():
 
                         youtube_publish_at = job.publish_at
 
-                        if youtube_publish_at <= now:
+                        if youtube_publish_at <= _utc_now_naive() or options.get("youtube_privacy", "public") != "public":
                             youtube_publish_at = None
 
                         if not Path(settings.youtube_token_file).is_file():
@@ -206,7 +210,7 @@ def execute_due_jobs():
                             content.description,
                             content.hashtags,
                             youtube_publish_at,
-                            privacy=options.get("youtube_privacy", settings.youtube_default_privacy),
+                            privacy=options.get("youtube_privacy", "public"),
                             keywords=content.keywords,
                         )
 
@@ -399,7 +403,7 @@ def poll_platform_jobs():
                         elif status.get("uploadStatus") == "processed" and not status.get("publishAt"):
                             # Future scheduled uploads are public on success; late uploads use configured privacy.
                             attempt = job.last_attempt_at or job.created_at
-                            expected = "public" if job.publish_at > attempt else options.get("youtube_privacy", "private")
+                            expected = options.get("youtube_privacy") or ("public" if job.publish_at > attempt else settings.youtube_default_privacy)
                             if status.get("privacyStatus") == expected:
                                 job.status, job.error = "PUBLISHED", ""
                     else:

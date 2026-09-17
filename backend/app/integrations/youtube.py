@@ -168,7 +168,7 @@ def publish_video(
         ),
     }
 
-    if publish_at is not None:
+    if publish_at is not None and (publish_at.replace(tzinfo=timezone.utc) if publish_at.tzinfo is None else publish_at.astimezone(timezone.utc)) > datetime.now(timezone.utc):
         status = {
             "privacyStatus": "private",
             "publishAt": _utc_rfc3339(

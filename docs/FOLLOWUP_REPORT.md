@@ -43,3 +43,26 @@ Local test/check results and GitHub CI results are recorded after final executio
 - Original PR CI run `35260864553`: passed before this follow-up; does not substitute for checking the new commit.
 
 The newly added Docker smoke check and updated regression CI must pass on the pushed follow-up commit. Their observed results will be recorded separately; no remote success is assumed here.
+
+### Observed GitHub verification
+
+For follow-up commit `59769b2`, GitHub Actions run **35262186297** completed successfully:
+
+- **Python 3.11 Build and Test:** passed.
+- **Docker Build and Real Media Smoke Test:** passed, including the built non-root image, actual FFprobe acceptance/rejection, content creation, actual video render and authenticated preview.
+- Run: https://github.com/rehmansaad281-dotcom/free-social-media-automation/actions/runs/35262186297
+
+A final review then corrected YouTube privacy scheduling: private/unlisted jobs do not upload early or receive native public `publishAt`; public jobs retain early/native scheduling. Three regression tests were added. Final local suite: **76 passed, 1 skipped** (sandbox FFprobe), with compilation, structure, dependency and whitespace checks passing. The subsequent pushed commit must also pass CI; the earlier run is not represented as testing unpushed code.
+
+### Changed-file guide
+
+- `backend/app/accounts.py`, `config.py`, `models.py`, `schemas.py`, `db.py`: account context, runtime limits, durable task/options schema, migrations and legacy guards.
+- `backend/app/locking.py`, `tasks.py`, `main.py`, `scheduler.py`: cross-process/content serialization, persistent execution, API/UI contracts, safe retry and completion polling.
+- `backend/app/integrations/{facebook,tiktok,tiktok_auth,youtube}.py`: official platform polling, OAuth/refresh, controls and privacy-correct uploads.
+- `backend/app/media.py`, `ai/tts.py`: bounded media processing, images/narration extension and speaker selection.
+- `frontend/index.html`: task/history interaction, accounts, authorization, posting controls and proper image previews.
+- `backend/constraints.txt`, `requirements.txt`, `requirements-youtube.txt`: tested pinned constraints and filelock dependency.
+- `.env.example`, `Dockerfile`, `.github/workflows/ci.yml`, `scripts/run.sh`: deployment settings, constraints, no OAuth query access logs and Docker smoke CI.
+- `scripts/cleanup_media.py`, `container_smoke.py`: safe offline maintenance and actual container/media acceptance checks.
+- `tests/__init__.py`, `conftest.py`, `test_completion.py`, `test_scheduler_integrations.py`: new and updated regression coverage.
+- `README.md`, `docs/ACCOUNTS.md`, `ARCHITECTURE.md`, `PLATFORM_NOTES.md`, `SETUP_LOCAL_AI.md`, `AUDIT_REPORT.md`, `FOLLOWUP_REPORT.md`: current setup, execution map, historical baseline clarification and evidence.
