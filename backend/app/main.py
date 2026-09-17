@@ -826,7 +826,7 @@ def retry_job(
 
     job.status = "QUEUED"
     job.error = ""
-    job.publish_at = datetime.now(
+    job.retry_at = datetime.now(
         timezone.utc
     ).replace(tzinfo=None)
 
