@@ -1,4 +1,5 @@
 import os
+from urllib.parse import urlsplit
 from pathlib import Path
 
 import httpx
@@ -40,6 +41,9 @@ def _json_response(
         raise RuntimeError(
             f"TikTok {action} returned invalid JSON"
         )
+
+    if not isinstance(data, dict):
+        raise RuntimeError(f"TikTok {action} returned an invalid response")
 
     if not response.is_success:
         error = data.get("error", {})
@@ -101,7 +105,7 @@ def _select_privacy(
         or settings.tiktok_privacy_level
     )
 
-    if allowed and privacy not in allowed:
+    if not allowed or privacy not in allowed:
         raise RuntimeError(
             "Configured TikTok privacy level "
             f"'{privacy}' is not allowed. "
@@ -150,14 +154,13 @@ def publish_video(
         path
     )
 
-    chunk_size = min(
-        file_size,
-        10_000_000,
-    )
-
-    total_chunks = (
-        file_size + chunk_size - 1
-    ) // chunk_size
+    if file_size <= 0:
+        raise ValueError("TikTok video is empty")
+    # The last chunk absorbs the remainder (rather than a too-small extra chunk).
+    chunk_size = min(file_size, 10_000_000)
+    total_chunks = max(1, file_size // chunk_size)
+    if total_chunks > 1000:
+        raise ValueError("TikTok video exceeds the supported chunk limit")
 
     payload = {
         "post_info": {
@@ -222,13 +225,18 @@ def publish_video(
             "return upload_url and publish_id"
         )
 
+    parsed = urlsplit(upload_url)
+    if parsed.scheme != "https" or not parsed.hostname or not (
+        parsed.hostname.endswith(".tiktokapis.com") or parsed.hostname.endswith(".tiktok.com")
+    ) or parsed.username:
+        raise RuntimeError("TikTok returned an untrusted upload URL")
+
     with path.open("rb") as media:
         offset = 0
 
         while offset < file_size:
-            chunk = media.read(
-                chunk_size
-            )
+            remaining = file_size - offset
+            chunk = media.read(remaining if remaining < 2 * chunk_size else chunk_size)
 
             if not chunk:
                 break

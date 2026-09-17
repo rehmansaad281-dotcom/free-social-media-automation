@@ -25,3 +25,6 @@ secrets/*
 *.mp3
 
 .gitignore
+
+whisper.cpp/
+.pytest_cache/

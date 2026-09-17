@@ -24,6 +24,8 @@ class ContentUpdate(BaseModel):
 class ScheduleCreate(BaseModel):
     content_id: int
     platform: str
+    privacy_level: str | None = None
+    consent: bool = False
     publish_at: datetime
     max_attempts: int = Field(
         default=3,
@@ -57,3 +59,9 @@ class RenderRequest(BaseModel):
         ge=12,
         le=120,
     )
+
+
+class ReconcileRequest(BaseModel):
+    published: bool
+    external_id: str = Field(default="", max_length=500)
+    note: str = Field(min_length=10, max_length=1000)

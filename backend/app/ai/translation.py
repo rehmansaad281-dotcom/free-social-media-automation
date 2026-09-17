@@ -1,3 +1,4 @@
+import re
 import httpx
 
 from ..config import settings
@@ -11,7 +12,7 @@ def translate_text(
     text = text.strip()
 
     if not text:
-        return ""
+        raise ValueError("Transcript cannot be empty.")
 
     source = source.strip()
     target = target.strip()
@@ -20,6 +21,28 @@ def translate_text(
         raise ValueError(
             "Target language is required."
         )
+
+    if not all(re.fullmatch(r"[a-z]{2,3}(?:-[A-Za-z]{2,4})?", code) for code in (source, target)):
+        raise ValueError("Use a valid source and target language code, such as en or ur.")
+    if source.lower() == target.lower():
+        return text
+    if settings.translation_backend == "argos":
+        try:
+            import argostranslate.translate
+        except ImportError as exc:
+            raise RuntimeError("Install backend/requirements-argos.txt and the required Argos language packages.") from exc
+        languages = {lang.code: lang for lang in argostranslate.translate.get_installed_languages()}
+        if source not in languages or target not in languages:
+            raise RuntimeError("Required Argos source/target language packages are not installed.")
+        try:
+            result = languages[source].get_translation(languages[target]).translate(text)
+        except Exception as exc:
+            raise RuntimeError("Argos translation failed; install the required language pair.") from exc
+        if not result.strip():
+            raise RuntimeError("Argos returned an empty translation.")
+        return result
+    if settings.translation_backend != "ollama":
+        raise ValueError("TRANSLATION_BACKEND must be ollama or argos.")
 
     if source and source.lower() == target.lower():
         return text
@@ -67,9 +90,10 @@ def translate_text(
             "Ollama returned an invalid translation response."
         )
 
-    translated = str(
-        data.get("response", "")
-    ).strip()
+    translated = data.get("response", "")
+    if not isinstance(translated, str):
+        raise RuntimeError("Ollama returned an invalid translation field type.")
+    translated = translated.strip()
 
     if not translated:
         raise RuntimeError(

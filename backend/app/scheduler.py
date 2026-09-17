@@ -1,10 +1,13 @@
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from .config import settings
+from .errors import public_error
+from sqlalchemy import update
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from .db import SessionLocal
-from .models import Job, Content, Media
+from .models import Job, Content, Media, PublicationAttempt
 from .integrations.facebook import FacebookPublisher
 from .integrations.tiktok import (
     publish_video as tiktok_publish,
@@ -37,6 +40,8 @@ def _resolve_publish_path(
     path = content.rendered_media_path or media.path
     resolved = Path(path).resolve()
 
+    if not resolved.is_relative_to(Path(settings.media_dir).resolve()):
+        raise RuntimeError("Publishing path is outside MEDIA_DIR")
     if not resolved.is_file():
         raise RuntimeError(
             f"Publishing media file not found: {resolved}"
@@ -126,14 +131,19 @@ def execute_due_jobs():
                 db.commit()
                 continue
 
-            job.status = "PUBLISHING"
-            job.attempts += 1
-            job.last_attempt_at = now
-            job.retry_at = None
-            job.error = ""
-
+            # Compare-and-set across sessions/processes, not just APScheduler's in-process lock.
+            claimed = db.execute(update(Job).where(Job.id == job.id, Job.status == "QUEUED").values(
+                status="PUBLISHING", attempts=Job.attempts + 1, last_attempt_at=now,
+                retry_at=None, error=""))
+            db.commit()
+            if not claimed.rowcount:
+                continue
+            db.refresh(job)
+            attempt = PublicationAttempt(job_id=job.id, attempt=job.attempts)
+            db.add(attempt)
             db.commit()
 
+            remote_started = False
             try:
                 path = _resolve_publish_path(
                     content,
@@ -142,6 +152,7 @@ def execute_due_jobs():
 
                 if job.platform == "facebook":
                     publisher = FacebookPublisher()
+                    remote_started = True
 
                     if media.media_type == "video":
                         external = publisher.publish_reel(
@@ -181,6 +192,9 @@ def execute_due_jobs():
                     if youtube_publish_at <= now:
                         youtube_publish_at = None
 
+                    if not Path(settings.youtube_token_file).is_file():
+                        raise RuntimeError("YouTube authorization required; run the explicit OAuth setup command.")
+                    remote_started = True
                     external = youtube_publish(
                         str(path),
                         content.title,
@@ -195,9 +209,9 @@ def execute_due_jobs():
                         )
 
                     job.external_id = str(external)
-                    job.status = "PUBLISHED"
+                    job.status = "UPLOADED" if youtube_publish_at else "PUBLISHED"
                     job.error = ""
-                    content.status = "PUBLISHED"
+                    content.status = job.status
 
                 elif job.platform == "tiktok":
                     if media.media_type != "video":
@@ -205,10 +219,12 @@ def execute_due_jobs():
                             "TikTok publishing requires video media"
                         )
 
-                    external = tiktok_publish(
-                        str(path),
-                        content.title,
-                    )
+                    if not settings.tiktok_access_token:
+                        raise RuntimeError("TikTok access token not configured")
+                    if not job.privacy_level:
+                        raise RuntimeError("Legacy TikTok job needs explicit privacy selection; recreate its schedule.")
+                    remote_started = True
+                    external = tiktok_publish(str(path), content.title, job.privacy_level)
 
                     if not external:
                         raise RuntimeError(
@@ -229,16 +245,23 @@ def execute_due_jobs():
                     )
 
             except Exception as exc:
-                job.error = str(exc)
-
-                if job.attempts < job.max_attempts:
+                # An exception after a request may mean the remote post succeeded.
+                # Never automatically re-upload an uncertain outcome.
+                job.error = public_error(exc)
+                if remote_started:
+                    job.status = "REVIEW_REQUIRED"
+                    job.error = "Publication outcome needs review before another upload: " + job.error
+                    job.retry_at = None
+                elif job.attempts < job.max_attempts:
                     _schedule_retry(job, now)
                 else:
-                    _mark_failed(
-                        job,
-                        str(exc),
-                    )
+                    _mark_failed(job, job.error)
 
+            attempt.status = job.status
+            attempt.external_id = job.external_id
+            attempt.error = job.error
+            if job.status != "PUBLISHING":
+                attempt.finished_at = _utc_now_naive()
             db.commit()
 
     finally:
@@ -275,6 +298,9 @@ def poll_tiktok_jobs():
                 if status == "PUBLISH_COMPLETE":
                     job.status = "PUBLISHED"
                     job.error = ""
+                    content = db.get(Content, job.content_id)
+                    if content:
+                        content.status = "PUBLISHED"
 
                 elif status == "FAILED":
                     reason = (
@@ -286,6 +312,7 @@ def poll_tiktok_jobs():
                         f"TikTok publishing failed: {reason}"
                     )
 
+                    job.external_id = ""
                     if job.attempts < job.max_attempts:
                         _schedule_retry(
                             job,
@@ -300,12 +327,17 @@ def poll_tiktok_jobs():
                 # PROCESSING_UPLOAD and other non-terminal
                 # states remain PUBLISHING.
 
+                attempt = db.query(PublicationAttempt).filter(PublicationAttempt.job_id == job.id).order_by(PublicationAttempt.id.desc()).first()
+                if attempt and status in {"PUBLISH_COMPLETE", "FAILED"}:
+                    attempt.status = "PUBLISHED" if status == "PUBLISH_COMPLETE" else "FAILED"
+                    attempt.error = job.error
+                    attempt.finished_at = _utc_now_naive()
                 db.commit()
 
             except Exception as exc:
                 job.error = (
                     "TikTok status check failed: "
-                    f"{exc}"
+                    f"{public_error(exc)}"
                 )
                 db.commit()
 
@@ -316,6 +348,11 @@ def poll_tiktok_jobs():
 def start_scheduler():
     if scheduler.running:
         return
+
+    with SessionLocal() as db:
+        db.query(Job).filter(Job.status == "PUBLISHING", Job.external_id == "").update({
+            Job.status: "REVIEW_REQUIRED", Job.error: "Interrupted publication. Verify platform history before reposting."})
+        db.commit()
 
     scheduler.add_job(
         execute_due_jobs,

@@ -70,37 +70,13 @@ def get_service():
         )
 
     if not credentials or not credentials.valid:
-        client_secret = Path(
-            settings.youtube_client_secrets_file
-        )
-
-        if not client_secret.is_file():
-            raise RuntimeError(
-                "YouTube client secret file not found: "
-                f"{client_secret}"
-            )
-
-        flow = (
-            InstalledAppFlow
-            .from_client_secrets_file(
-                str(client_secret),
-                SCOPES,
-            )
-        )
-
-        credentials = flow.run_local_server(
-            port=0
-        )
-
-        token.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        token.write_text(
-            credentials.to_json(),
-            encoding="utf-8",
-        )
+        raise RuntimeError("YouTube authorization required. Run python -m backend.app.integrations.youtube on the owner's local machine first.")
+    token.parent.mkdir(parents=True, exist_ok=True)
+    temporary = token.with_suffix(".tmp")
+    temporary.touch(mode=0o600, exist_ok=True)
+    temporary.chmod(0o600)
+    temporary.write_text(credentials.to_json(), encoding="utf-8")
+    temporary.replace(token)
 
     return build(
         "youtube",
@@ -154,6 +130,10 @@ def publish_video(
             "a supported video file"
         )
 
+    if not title.strip():
+        raise ValueError("YouTube title is required")
+    if (privacy or settings.youtube_default_privacy) not in {"private", "public", "unlisted"}:
+        raise ValueError("Invalid YouTube privacy setting")
     youtube = get_service()
 
     status: dict[str, str] = {
@@ -203,7 +183,7 @@ def publish_video(
 
     except Exception as exc:
         raise RuntimeError(
-            f"YouTube upload failed: {exc}"
+            "YouTube upload failed. Check authorization, quota, video metadata, and the platform upload history before retrying."
         ) from exc
 
     video_id = response.get("id")
@@ -215,3 +195,18 @@ def publish_video(
         )
 
     return str(video_id)
+
+
+def authorize():
+    """Explicit interactive setup only; never run OAuth in the queue worker."""
+    flow = InstalledAppFlow.from_client_secrets_file(settings.youtube_client_secrets_file, SCOPES)
+    credentials = flow.run_local_server(port=0)
+    token = Path(settings.youtube_token_file)
+    token.parent.mkdir(parents=True, exist_ok=True)
+    token.touch(mode=0o600, exist_ok=True)
+    token.chmod(0o600)
+    token.write_text(credentials.to_json(), encoding="utf-8")
+
+
+if __name__ == "__main__":
+    authorize()

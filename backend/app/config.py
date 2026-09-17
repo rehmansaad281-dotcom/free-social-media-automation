@@ -1,3 +1,5 @@
+from pydantic import Field
+from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,7 +13,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
-    max_upload_mb: int = 2048
+    max_upload_mb: int = Field(default=2048, ge=1, le=10240)
 
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "llama3.2:3b"
@@ -24,6 +26,12 @@ class Settings(BaseSettings):
     piper_voice_dir: str = "./models/piper"
 
     ffmpeg_bin: str = "ffmpeg"
+    ffprobe_bin: str = "ffprobe"
+    process_timeout: int = Field(default=1800, ge=1, le=86400)
+    scheduler_enabled: bool = True
+    auth_username: str = "owner"
+    auth_password: str = ""
+    translation_backend: Literal["ollama", "argos"] = "ollama"
 
     facebook_graph_version: str = "v23.0"
     facebook_page_id: str = ""
@@ -33,7 +41,7 @@ class Settings(BaseSettings):
         "./secrets/youtube_client_secret.json"
     )
     youtube_token_file: str = "./secrets/youtube_token.json"
-    youtube_default_privacy: str = "private"
+    youtube_default_privacy: Literal["private", "public", "unlisted"] = "private"
 
     tiktok_access_token: str = ""
     tiktok_privacy_level: str = "SELF_ONLY"

@@ -1,12 +1,15 @@
 import subprocess
+import json
+import tempfile
+import shutil
 from pathlib import Path
 
 from .config import settings
 
 
-def run_ffmpeg(args: list[str]):
+def run_ffmpeg(args: list[str], cwd=None):
     command = [
-        settings.ffmpeg_bin,
+        str(Path(settings.ffmpeg_bin).resolve()) if "/" in settings.ffmpeg_bin or "\\" in settings.ffmpeg_bin else settings.ffmpeg_bin,
         "-y",
         *args,
     ]
@@ -17,6 +20,8 @@ def run_ffmpeg(args: list[str]):
             check=True,
             capture_output=True,
             text=True,
+            timeout=settings.process_timeout,
+            cwd=cwd,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
@@ -31,28 +36,36 @@ def run_ffmpeg(args: list[str]):
         )
 
         raise RuntimeError(
-            f"FFmpeg failed: {details}"
+            "FFmpeg processing failed. Check media readability, codecs, and the libass subtitle filter."
         ) from exc
 
     return result
 
 
 def probe(path: str) -> dict:
-    result = subprocess.run(
-        [
-            settings.ffmpeg_bin,
-            "-i",
-            path,
-            "-hide_banner",
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [settings.ffprobe_bin, "-v", "error", "-protocol_whitelist", "file,pipe",
+             "-format_whitelist", "mov,matroska,avi,image2,png_pipe,jpeg_pipe,webp_pipe,gif",
+             "-show_streams", "-show_format", "-of", "json", str(Path(path).resolve())],
+            check=True, capture_output=True, text=True, timeout=30,
+        )
+        data = json.loads(result.stdout)
+    except FileNotFoundError as exc:
+        raise RuntimeError("FFprobe missing. Install FFmpeg and configure FFPROBE_BIN.") from exc
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise ValueError("Media is unreadable or unsupported by FFprobe.") from exc
+    if not isinstance(data, dict) or not data.get("streams"):
+        raise ValueError("Media has no readable streams.")
+    return data
 
-    return {
-        "raw": result.stderr,
-        "return_code": result.returncode,
-    }
+
+def normalize_video(input_path: str, output_path: str):
+    run_ffmpeg(["-protocol_whitelist", "file,pipe", "-i", input_path,
+                "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264",
+                "-pix_fmt", "yuv420p", "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                "-c:a", "aac", "-movflags", "+faststart", output_path])
+    return output_path
 
 
 def replace_audio(
@@ -71,7 +84,10 @@ def replace_audio(
             "-map",
             "1:a:0",
             "-c:v",
-            "copy",
+            "libx264",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            "-af", "apad",
             "-c:a",
             "aac",
             "-shortest",
@@ -101,15 +117,8 @@ def burn_subtitles(
             f"Subtitle file not found: {srt}"
         )
 
-    escaped = (
-        str(srt)
-        .replace("\\", "/")
-        .replace(":", "\\:")
-        .replace("'", "\\'")
-    )
-
     vf = (
-        f"subtitles='{escaped}':"
+        "subtitles=captions.srt:"
         f"force_style="
         f"'FontSize={font_size},"
         f"Alignment=2,"
@@ -118,17 +127,22 @@ def burn_subtitles(
         f"MarginV=70'"
     )
 
-    run_ffmpeg(
-        [
-            "-i",
-            str(video),
-            "-vf",
-            vf,
-            "-c:a",
-            "copy",
-            output_path,
-        ]
-    )
+    with tempfile.TemporaryDirectory(prefix="subtitle-burn-") as temp:
+        shutil.copyfile(srt, Path(temp) / "captions.srt")
+        run_ffmpeg(
+            [
+                "-i",
+                str(video),
+                "-vf",
+                vf,
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                "-c:a",
+                "aac",
+                str(Path(output_path).resolve()),
+            ], cwd=temp
+        )
 
     return output_path
 
@@ -182,9 +196,7 @@ def captions_to_srt(
         if end_ms <= start_ms:
             continue
 
-        text = str(
-            caption.text
-        ).strip()
+        text = " ".join(str(caption.text).splitlines()).strip()
 
         if not text:
             continue

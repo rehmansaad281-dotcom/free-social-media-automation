@@ -1,4 +1,6 @@
 import subprocess
+import wave
+import json
 from pathlib import Path
 
 from ..config import settings
@@ -29,29 +31,21 @@ def list_voices():
         models.insert(0, configured_model)
 
     for model in models:
+        if not model.is_file() or not Path(str(model) + ".json").is_file():
+            continue
         voice_id = model.stem
-        lower_id = voice_id.lower()
-
-        if any(
-            marker in lower_id
-            for marker in (
-                "female",
-                "woman",
-                "amy",
-                "lessac",
-            )
-        ):
-            gender = "female"
-        elif any(
-            marker in lower_id
-            for marker in (
-                "male",
-                "man",
-            )
-        ):
-            gender = "male"
-        else:
+        try:
+            config = json.loads(Path(str(model) + ".json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(config, dict):
+            continue
+        # Voice gender is not reliably encoded in Piper filenames. Do not guess.
+        gender = config.get("gender", "unknown")
+        if gender not in {"male", "female", "neutral"}:
             gender = "unknown"
+        language = config.get("language", {})
+        language = language.get("code", "unknown") if isinstance(language, dict) else "unknown"
 
         result.append(
             {
@@ -60,7 +54,7 @@ def list_voices():
                     "_", " "
                 ).title(),
                 "gender": gender,
-                "language": "unknown",
+                "language": language,
                 "model_path": str(model),
             }
         )
@@ -90,9 +84,9 @@ def synthesize(
         model_path or settings.piper_model
     )
 
-    if not model.is_file():
+    if not model.is_file() or not Path(str(model) + ".json").is_file():
         raise RuntimeError(
-            f"Piper voice model not found: {model}"
+            "Piper requires both a voice .onnx model and its .onnx.json configuration."
         )
 
     command = [
@@ -109,6 +103,7 @@ def synthesize(
             input=text.encode("utf-8"),
             check=True,
             capture_output=True,
+            timeout=settings.process_timeout,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
@@ -126,7 +121,7 @@ def synthesize(
         )
 
         raise RuntimeError(
-            f"Piper synthesis failed: {stderr.strip()}"
+            "Piper synthesis failed. Check model/config compatibility and the selected voice."
         ) from exc
 
     if not output.is_file():
@@ -135,4 +130,7 @@ def synthesize(
             "the output audio file."
         )
 
+    with wave.open(str(output), "rb") as audio:
+        if audio.getnframes() == 0 or audio.getframerate() <= 0:
+            raise RuntimeError("Piper produced empty audio.")
     return str(output)
