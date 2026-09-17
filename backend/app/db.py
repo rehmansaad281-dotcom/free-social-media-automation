@@ -7,10 +7,7 @@ from .config import settings
 
 
 Path("data").mkdir(exist_ok=True)
-Path(settings.media_dir).mkdir(
-    parents=True,
-    exist_ok=True,
-)
+Path(settings.media_dir).mkdir(parents=True, exist_ok=True)
 
 connect_args = (
     {"check_same_thread": False}
@@ -33,10 +30,6 @@ Base = declarative_base()
 
 
 def _migrate_sqlite():
-    """
-    Apply small additive SQLite migrations that SQLAlchemy
-    create_all() does not perform on existing tables.
-    """
     if not settings.database_url.startswith("sqlite"):
         return
 
