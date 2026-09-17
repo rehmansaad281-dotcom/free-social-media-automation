@@ -14,9 +14,6 @@ from .integrations.tiktok import (
 )
 
 
-# YouTube needs the video uploaded before its scheduled
-# publish time. The scheduler therefore starts the upload
-# before the requested publish_at time.
 YOUTUBE_UPLOAD_LEAD_SECONDS = 600
 
 
@@ -54,17 +51,10 @@ def _resolve_publish_path(
     return resolved
 
 
-def _youtube_due(job: Job, now: datetime) -> bool:
-    """
-    YouTube uploads must happen before publish_at.
-
-    Example:
-    publish_at = 12:00
-    upload window starts = 11:50
-
-    If the scheduler runs after 11:50, the job can be
-    uploaded with YouTube publishAt=12:00.
-    """
+def _youtube_due(
+    job: Job,
+    now: datetime,
+) -> bool:
     upload_start = (
         job.publish_at
         - timedelta(
@@ -75,7 +65,13 @@ def _youtube_due(job: Job, now: datetime) -> bool:
     return upload_start <= now
 
 
-def _job_is_due(job: Job, now: datetime) -> bool:
+def _job_is_due(
+    job: Job,
+    now: datetime,
+) -> bool:
+    if job.retry_at is not None:
+        return job.retry_at <= now
+
     if job.platform == "youtube":
         return _youtube_due(job, now)
 
@@ -129,6 +125,7 @@ def execute_due_jobs():
             job.status = "PUBLISHING"
             job.attempts += 1
             job.last_attempt_at = now
+            job.retry_at = None
 
             db.commit()
 
@@ -169,11 +166,6 @@ def execute_due_jobs():
                             "video media"
                         )
 
-                    # Keep the requested future publish time
-                    # when possible. If the scheduler is late
-                    # enough that publish_at has already passed,
-                    # publish immediately instead of sending an
-                    # invalid past publishAt to YouTube.
                     youtube_publish_at = job.publish_at
 
                     if youtube_publish_at <= now:
@@ -214,6 +206,7 @@ def execute_due_jobs():
                 job.external_id = str(external)
                 job.status = "PUBLISHED"
                 job.error = ""
+                job.retry_at = None
 
                 content.status = "PUBLISHED"
 
@@ -228,7 +221,7 @@ def execute_due_jobs():
                         2 ** job.attempts,
                     )
 
-                    job.publish_at = (
+                    job.retry_at = (
                         now
                         + timedelta(
                             minutes=retry_minutes
@@ -236,6 +229,7 @@ def execute_due_jobs():
                     )
                 else:
                     job.status = "FAILED"
+                    job.retry_at = None
 
             db.commit()
 
@@ -281,8 +275,6 @@ def poll_tiktok_jobs():
                 db.commit()
 
             except Exception as exc:
-                # Do not change the main publishing state
-                # because a temporary status request failed.
                 job.error = (
                     "TikTok status check failed: "
                     f"{exc}"
