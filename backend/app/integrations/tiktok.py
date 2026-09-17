@@ -1,9 +1,12 @@
 import os
+from urllib.parse import urlsplit
 from pathlib import Path
 
 import httpx
 
 from ..config import settings
+from ..media import probe
+from .tiktok_auth import access_token
 
 
 BASE = "https://open.tiktokapis.com/v2"
@@ -16,15 +19,10 @@ SUPPORTED_VIDEO_EXTENSIONS = {
 
 
 def _headers() -> dict[str, str]:
-    if not settings.tiktok_access_token:
-        raise RuntimeError(
-            "TikTok access token not configured"
-        )
-
     return {
         "Authorization": (
             f"Bearer "
-            f"{settings.tiktok_access_token}"
+            f"{access_token()}"
         ),
         "Content-Type": "application/json",
     }
@@ -41,31 +39,12 @@ def _json_response(
             f"TikTok {action} returned invalid JSON"
         )
 
-    if not response.is_success:
-        error = data.get("error", {})
+    if not isinstance(data, dict):
+        raise RuntimeError(f"TikTok {action} returned an invalid response")
 
-        message = (
-            error.get("message")
-            if isinstance(error, dict)
-            else None
-        )
-
-        raise RuntimeError(
-            f"TikTok {action} failed: "
-            f"{message or response.text}"
-        )
-
-    error = data.get("error", {})
-
-    if isinstance(error, dict):
-        code = error.get("code")
-
-        if code and code != "ok":
-            raise RuntimeError(
-                f"TikTok {action} failed: "
-                f"{error.get('message') or code}"
-            )
-
+    error = data.get("error") or {}
+    if not response.is_success or not isinstance(error, dict) or error.get("code") not in {None, "ok"}:
+        raise RuntimeError(f"TikTok {action} failed (HTTP {response.status_code}). Check authorization, creator eligibility and platform limits.")
     return data
 
 
@@ -101,7 +80,7 @@ def _select_privacy(
         or settings.tiktok_privacy_level
     )
 
-    if allowed and privacy not in allowed:
+    if not allowed or privacy not in allowed:
         raise RuntimeError(
             "Configured TikTok privacy level "
             f"'{privacy}' is not allowed. "
@@ -115,6 +94,7 @@ def publish_video(
     media_path: str,
     title: str,
     privacy_level: str | None = None,
+    options: dict | None = None,
 ) -> str:
     path = Path(
         media_path
@@ -146,18 +126,28 @@ def publish_video(
         privacy_level,
     )
 
+    options = options or {}
+    media_info = probe(str(path))
+    duration = float(media_info.get("format", {}).get("duration", 0))
+    maximum = info.get("max_video_post_duration_sec")
+    if not isinstance(maximum, (int, float)) or maximum <= 0:
+        raise RuntimeError("TikTok creator information did not include a valid maximum video duration")
+    if duration <= 0 or duration > maximum:
+        raise ValueError("Video exceeds this TikTok creator's duration limit or has no valid duration")
+    if options.get("brand_content_toggle") and privacy == "SELF_ONLY":
+        raise ValueError("TikTok branded content cannot use private visibility")
+
     file_size = os.path.getsize(
         path
     )
 
-    chunk_size = min(
-        file_size,
-        10_000_000,
-    )
-
-    total_chunks = (
-        file_size + chunk_size - 1
-    ) // chunk_size
+    if file_size <= 0:
+        raise ValueError("TikTok video is empty")
+    # The last chunk absorbs the remainder (rather than a too-small extra chunk).
+    chunk_size = min(file_size, 10_000_000)
+    total_chunks = max(1, file_size // chunk_size)
+    if total_chunks > 1000:
+        raise ValueError("TikTok video exceeds the supported chunk limit")
 
     payload = {
         "post_info": {
@@ -189,6 +179,11 @@ def publish_video(
             "total_chunk_count": total_chunks,
         },
     }
+
+    for field in ("disable_comment", "disable_duet", "disable_stitch"):
+        payload["post_info"][field] = payload["post_info"][field] or options.get(field, True)
+    for field in ("brand_content_toggle", "brand_organic_toggle", "is_aigc"):
+        payload["post_info"][field] = bool(options.get(field, False))
 
     response = httpx.post(
         f"{BASE}/post/publish/"
@@ -222,13 +217,18 @@ def publish_video(
             "return upload_url and publish_id"
         )
 
+    parsed = urlsplit(upload_url)
+    if parsed.scheme != "https" or not parsed.hostname or not (
+        parsed.hostname.endswith(".tiktokapis.com") or parsed.hostname.endswith(".tiktok.com")
+    ) or parsed.username:
+        raise RuntimeError("TikTok returned an untrusted upload URL")
+
     with path.open("rb") as media:
         offset = 0
 
         while offset < file_size:
-            chunk = media.read(
-                chunk_size
-            )
+            remaining = file_size - offset
+            chunk = media.read(remaining if remaining < 2 * chunk_size else chunk_size)
 
             if not chunk:
                 break
@@ -258,8 +258,7 @@ def publish_video(
 
             if not upload_response.is_success:
                 raise RuntimeError(
-                    "TikTok video upload failed: "
-                    f"{upload_response.text}"
+                    "TikTok binary upload failed. Inspect the saved publish ID before retrying."
                 )
 
             offset = end + 1

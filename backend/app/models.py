@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import String, Text, DateTime, Integer, Boolean
+from sqlalchemy import String, Text, DateTime, Integer, Boolean, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -25,7 +25,7 @@ class Content(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     media_id: Mapped[int | None] = mapped_column(
-        Integer,
+        Integer, ForeignKey("media.id", ondelete="RESTRICT"),
         nullable=True,
     )
     title: Mapped[str] = mapped_column(Text, default="")
@@ -50,6 +50,7 @@ class Content(Base):
         String(1000),
         default="",
     )
+    caption_audio_path: Mapped[str] = mapped_column(String(1000), default="")
     rendered_media_path: Mapped[str] = mapped_column(
         String(1000),
         default="",
@@ -74,7 +75,7 @@ class Caption(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     content_id: Mapped[int] = mapped_column(
-        Integer,
+        Integer, ForeignKey("content.id", ondelete="RESTRICT"),
         index=True,
     )
     start_ms: Mapped[int] = mapped_column(Integer)
@@ -116,12 +117,16 @@ class Job(Base):
         primary_key=True,
     )
     content_id: Mapped[int] = mapped_column(
-        Integer,
+        Integer, ForeignKey("content.id", ondelete="RESTRICT"),
         index=True,
     )
     platform: Mapped[str] = mapped_column(
         String(30),
     )
+
+    account_key: Mapped[str] = mapped_column(String(80), default="default")
+    options_json: Mapped[str] = mapped_column(Text, default="{}")
+    privacy_level: Mapped[str] = mapped_column(String(50), default="")
 
     # Original user-requested publication time.
     publish_at: Mapped[datetime] = mapped_column(
@@ -193,3 +198,29 @@ class PlatformAccount(Base):
         DateTime,
         default=datetime.utcnow,
     )
+
+
+class PublicationAttempt(Base):
+    """Durable attempt journal; remote outcomes may require owner reconciliation."""
+    __tablename__ = "publication_attempts"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    job_id: Mapped[int] = mapped_column(Integer, ForeignKey("jobs.id", ondelete="RESTRICT"), index=True)
+    attempt: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(30), default="PUBLISHING")
+    external_id: Mapped[str] = mapped_column(String(500), default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class MediaTask(Base):
+    __tablename__ = "media_tasks"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    content_id: Mapped[int] = mapped_column(Integer, ForeignKey("content.id"), index=True)
+    action: Mapped[str] = mapped_column(String(30))
+    payload: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(30), default="QUEUED", index=True)
+    result: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

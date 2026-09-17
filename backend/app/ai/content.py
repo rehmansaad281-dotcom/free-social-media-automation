@@ -62,25 +62,28 @@ def generate_metadata(
     if not transcript.strip():
         raise ValueError("Transcript cannot be empty.")
 
-    client = Client(host=settings.ollama_base_url)
+    client = Client(host=settings.ollama_base_url, timeout=120.0)
 
-    response = client.chat(
-        model=settings.ollama_model,
-        messages=[
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT,
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Platform: {platform}\n\n"
-                    f"Transcript:\n{transcript}"
-                ),
-            },
-        ],
-        format="json",
-    )
+    try:
+        response = client.chat(
+            model=settings.ollama_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT,
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Platform: {platform}\n\n"
+                        f"Transcript:\n{transcript}"
+                    ),
+                },
+            ],
+            format="json",
+        )
+    except Exception as exc:
+        raise RuntimeError("Ollama metadata request failed. Start Ollama and pull the configured OLLAMA_MODEL; check service connectivity.") from exc
 
     try:
         raw = response["message"]["content"]
@@ -100,6 +103,12 @@ def generate_metadata(
         raise RuntimeError(
             "Ollama metadata response is not a JSON object."
         )
+
+    if not all(isinstance(data.get(k), str) for k in ("title", "description")) or not all(
+        isinstance(data.get(k), list) and all(isinstance(v, str) for v in data[k])
+        for k in ("hashtags", "keywords")
+    ):
+        raise RuntimeError("Ollama metadata has invalid field types; retry generation.")
 
     title = str(data.get("title", "")).strip()
     description = str(data.get("description", "")).strip()

@@ -10,10 +10,10 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-COPY backend/requirements.txt /app/backend/requirements.txt
+COPY backend/requirements*.txt backend/constraints.txt /app/backend/
 
 RUN pip install --upgrade pip \
-    && pip install -r /app/backend/requirements.txt
+    && pip install -r /app/backend/requirements.txt -r /app/backend/requirements-youtube.txt
 
 COPY backend /app/backend
 COPY frontend /app/frontend
@@ -27,6 +27,10 @@ RUN mkdir -p /app/data \
     /app/models \
     /app/secrets
 
+RUN groupadd --gid 10001 app && useradd --uid 10001 --gid app --no-create-home app \
+    && chown -R app:app /app
+USER app
+
 EXPOSE 8000
 
-CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

@@ -15,3 +15,6 @@ secrets/*
 .idea/
 .vscode/
 .DS_Store
+
+whisper.cpp/
+.pytest_cache/

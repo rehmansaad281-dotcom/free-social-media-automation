@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from pathlib import Path
+from filelock import FileLock
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
@@ -11,6 +12,7 @@ from ..config import settings
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.readonly",
 ]
 
 
@@ -46,67 +48,43 @@ def get_service():
         settings.youtube_token_file
     )
 
-    credentials = None
+    token.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(token) + ".lock", timeout=65):
+        credentials = None
 
-    if token.is_file():
-        credentials = (
-            Credentials.from_authorized_user_file(
-                str(token),
-                SCOPES,
-            )
-        )
-
-    if (
-        credentials
-        and credentials.expired
-        and credentials.refresh_token
-    ):
-        from google.auth.transport.requests import (
-            Request,
-        )
-
-        credentials.refresh(
-            Request()
-        )
-
-    if not credentials or not credentials.valid:
-        client_secret = Path(
-            settings.youtube_client_secrets_file
-        )
-
-        if not client_secret.is_file():
-            raise RuntimeError(
-                "YouTube client secret file not found: "
-                f"{client_secret}"
+        if token.is_file():
+            credentials = (
+                Credentials.from_authorized_user_file(
+                    str(token),
+                    SCOPES,
+                )
             )
 
-        flow = (
-            InstalledAppFlow
-            .from_client_secrets_file(
-                str(client_secret),
-                SCOPES,
+        if (
+            credentials
+            and credentials.expired
+            and credentials.refresh_token
+        ):
+            from google.auth.transport.requests import (
+                Request,
             )
-        )
 
-        credentials = flow.run_local_server(
-            port=0
-        )
+            credentials.refresh(
+                Request()
+            )
 
-        token.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        if not credentials or not credentials.valid:
+            raise RuntimeError("YouTube authorization required. Run python -m backend.app.integrations.youtube on the owner's local machine first.")
+        token.parent.mkdir(parents=True, exist_ok=True)
+        from .tiktok_auth import save_private
+        import json
+        save_private(token, json.loads(credentials.to_json()))
 
-        token.write_text(
-            credentials.to_json(),
-            encoding="utf-8",
+        return build(
+            "youtube",
+            "v3",
+            credentials=credentials,
         )
-
-    return build(
-        "youtube",
-        "v3",
-        credentials=credentials,
-    )
 
 
 def _build_tags(
@@ -129,6 +107,28 @@ def _build_tags(
     return tags
 
 
+def metadata_tags(hashtags: str, keywords: str) -> list[str]:
+    values = _build_tags(hashtags) + [value.strip() for value in keywords.split(",")]
+    result, length = [], 0
+    for value in values:
+        if not value or value in result:
+            continue
+        cost = len(value) + (2 if " " in value else 0) + (1 if result else 0)
+        if length + cost > 500:
+            raise ValueError("YouTube tags exceed the 500-character API limit")
+        result.append(value)
+        length += cost
+    return result
+
+
+def get_status(video_id: str) -> dict:
+    response = get_service().videos().list(part="status,processingDetails", id=video_id).execute()
+    items = response.get("items", [])
+    if not items:
+        raise RuntimeError("YouTube video not found for this authorized account")
+    return items[0]
+
+
 def publish_video(
     media_path: str,
     title: str,
@@ -136,6 +136,7 @@ def publish_video(
     hashtags: str,
     publish_at: datetime | None = None,
     privacy: str | None = None,
+    keywords: str = "",
 ) -> str:
     path = Path(
         media_path
@@ -154,6 +155,10 @@ def publish_video(
             "a supported video file"
         )
 
+    if not title.strip():
+        raise ValueError("YouTube title is required")
+    if (privacy or settings.youtube_default_privacy) not in {"private", "public", "unlisted"}:
+        raise ValueError("Invalid YouTube privacy setting")
     youtube = get_service()
 
     status: dict[str, str] = {
@@ -163,7 +168,7 @@ def publish_video(
         ),
     }
 
-    if publish_at is not None:
+    if publish_at is not None and (publish_at.replace(tzinfo=timezone.utc) if publish_at.tzinfo is None else publish_at.astimezone(timezone.utc)) > datetime.now(timezone.utc):
         status = {
             "privacyStatus": "private",
             "publishAt": _utc_rfc3339(
@@ -177,9 +182,7 @@ def publish_video(
             "description": (
                 f"{description}\n\n{hashtags}"
             ).strip()[:5000],
-            "tags": _build_tags(
-                hashtags
-            ),
+            "tags": metadata_tags(hashtags, keywords),
             "categoryId": "22",
         },
         "status": status,
@@ -193,17 +196,19 @@ def publish_video(
                 body=body,
                 media_body=MediaFileUpload(
                     str(path),
-                    chunksize=-1,
+                    chunksize=8 * 1024 * 1024,
                     resumable=True,
                 ),
             )
         )
 
-        response = request.execute()
+        response = None
+        while response is None:
+            _, response = request.next_chunk(num_retries=0)
 
     except Exception as exc:
         raise RuntimeError(
-            f"YouTube upload failed: {exc}"
+            "YouTube upload failed. Check authorization, quota, video metadata, and the platform upload history before retrying."
         ) from exc
 
     video_id = response.get("id")
@@ -215,3 +220,24 @@ def publish_video(
         )
 
     return str(video_id)
+
+
+def authorize():
+    """Explicit interactive setup only; never run OAuth in the queue worker."""
+    flow = InstalledAppFlow.from_client_secrets_file(settings.youtube_client_secrets_file, SCOPES)
+    credentials = flow.run_local_server(port=0)
+    token = Path(settings.youtube_token_file)
+    token.parent.mkdir(parents=True, exist_ok=True)
+    token.touch(mode=0o600, exist_ok=True)
+    token.chmod(0o600)
+    token.write_text(credentials.to_json(), encoding="utf-8")
+
+
+if __name__ == "__main__":
+    import argparse
+    from ..accounts import account_context
+    parser = argparse.ArgumentParser(description="Authorize a configured YouTube account")
+    parser.add_argument("--account-key", default="default")
+    args = parser.parse_args()
+    with account_context("youtube", args.account_key):
+        authorize()

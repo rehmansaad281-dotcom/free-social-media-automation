@@ -165,8 +165,8 @@ Private • local AI • official platform APIs • no billing system
 <input id="file" type="file" accept="video/*,image/*">
 
 <div class="actions">
-<button onclick="upload()">Upload</button>
-<button class="secondary" onclick="loadMedia()">Refresh Media</button>
+<button onclick="return upload()">Upload</button>
+<button class="secondary" onclick="return loadMedia()">Refresh Media</button>
 </div>
 
 <pre id="uploadResult"></pre>
@@ -174,6 +174,7 @@ Private • local AI • official platform APIs • no billing system
 <div id="mediaPreview" class="preview-wrap" style="display:none">
 <h3>Preview</h3>
 <video id="sourceVideo" controls playsinline></video>
+<img id="sourceImage" alt="Selected media" style="display:none;max-width:100%;max-height:520px">
 </div>
 
 <div id="mediaList"></div>
@@ -197,8 +198,9 @@ Private • local AI • official platform APIs • no billing system
 <input id="keywords" placeholder="keywords">
 
 <div class="actions">
-<button onclick="createContent()">Save Draft</button>
-<button class="secondary" onclick="loadContent()">Load Content</button>
+<button onclick="return createContent()">Save Draft</button>
+<button class="secondary" onclick="newDraft()">New Draft</button>
+<button class="secondary" onclick="return loadContent()">Load Content</button>
 </div>
 
 <pre id="contentResult"></pre>
@@ -219,7 +221,9 @@ Private • local AI • official platform APIs • no billing system
 </select>
 </div>
 
-<button onclick="generate()">Generate Transcript + AI Metadata + Word Captions</button>
+<button onclick="return generate()">Generate Transcript + AI Metadata + Word Captions</button>
+<button class="secondary" onclick="return generate(false)">Transcribe + Captions Only</button>
+<button class="secondary" onclick="return metadataOnly()">Generate Metadata from Saved Transcript</button>
 
 <pre id="aiResult"></pre>
 </div>
@@ -231,7 +235,7 @@ Private • local AI • official platform APIs • no billing system
 <div class="row">
 <input id="captionContent" type="number" placeholder="Content ID">
 
-<button onclick="loadCaptions()">Load Captions</button>
+<button onclick="return loadCaptions()">Load Captions</button>
 </div>
 
 <div id="captionEditor" class="caption-list">
@@ -239,7 +243,7 @@ Private • local AI • official platform APIs • no billing system
 </div>
 
 <div class="actions">
-<button onclick="saveCaptions()">Save Caption Changes</button>
+<button onclick="return saveCaptions()">Save Caption Changes</button>
 <button class="secondary" onclick="addCaption()">Add Caption</button>
 </div>
 
@@ -259,7 +263,7 @@ Private • local AI • official platform APIs • no billing system
 </select>
 </div>
 
-<button onclick="translateText()">Translate</button>
+<button onclick="return translateText()">Translate</button>
 
 <pre id="translationResult"></pre>
 </div>
@@ -271,16 +275,18 @@ Private • local AI • official platform APIs • no billing system
 <div class="grid">
 <input id="voiceContent" type="number" placeholder="Content ID">
 
-<select id="voice">
+<select id="voice" onchange="updateSpeakers()">
 <option value="">Default voice</option>
 </select>
 </div>
 
+<select id="speaker"><option value="">Default speaker</option></select>
 <textarea id="voiceText" placeholder="Use translated text or custom script"></textarea>
 
 <div class="actions">
-<button onclick="makeVoice()">Generate Voice-over</button>
-<button class="secondary" onclick="loadVoices()">Refresh Voices</button>
+<button onclick="return makeVoice()">Generate Voice-over</button>
+<button class="secondary" onclick="return loadVoices()">Refresh Voices</button>
+<button class="secondary" onclick="return voiceCaptions()">Generate Captions from Voice-over</button>
 </div>
 
 <pre id="voiceResult"></pre>
@@ -307,7 +313,10 @@ Private • local AI • official platform APIs • no billing system
 <label class="muted">Subtitle font size</label>
 <input id="subtitleSize" type="number" min="12" max="120" value="48">
 
-<button onclick="render()">Create Final Video</button>
+<select id="narrationPolicy"><option value="extend">Extend final frame for longer narration</option><option value="trim">Trim narration to video duration</option></select>
+<label>Still image video duration (seconds)</label>
+<input id="imageDuration" type="number" min="1" max="300" value="10">
+<button onclick="return render()">Create Final Video</button>
 
 <pre id="renderResult"></pre>
 
@@ -324,18 +333,33 @@ Private • local AI • official platform APIs • no billing system
 <div class="grid">
 <input id="scheduleContent" type="number" placeholder="Content ID">
 
-<select id="schedulePlatform">
+<select id="schedulePlatform" onchange="refreshAccountOptions()">
 <option value="facebook">Facebook</option>
 <option value="youtube">YouTube</option>
 <option value="tiktok">TikTok</option>
 </select>
 
+<select id="scheduleAccount"><option value="default">Configured default</option></select>
+<select id="facebookMode"><option value="reel">Facebook Reel</option><option value="post">Facebook standard post/video</option></select>
+<select id="youtubePrivacy"><option value="private">YouTube private</option><option value="unlisted">YouTube unlisted</option><option value="public">YouTube public</option></select>
 <input id="scheduleTime" type="datetime-local">
 
 <input id="attempts" type="number" value="3" min="1" max="10">
 </div>
 
-<button onclick="schedule()">Schedule</button>
+<div class="muted">For TikTok: load creator information and explicitly select privacy before scheduling. Approval restrictions still apply.</div>
+<button class="secondary" onclick="return loadCreator()">Load TikTok Creator / Privacy Options</button>
+<button class="secondary" onclick="return connectTikTok()">Authorize Selected TikTok Account</button>
+<pre id="creatorResult"></pre>
+<select id="tiktokPrivacy"><option value="">Select TikTok privacy explicitly</option></select>
+<label><input id="tiktokConsent" type="checkbox" style="width:auto"> I approve this TikTok upload and confirm I have rights to its media/music.</label>
+<label><input id="disableComment" type="checkbox" checked style="width:auto"> Disable comments</label>
+<label><input id="disableDuet" type="checkbox" checked style="width:auto"> Disable duet</label>
+<label><input id="disableStitch" type="checkbox" checked style="width:auto"> Disable stitch</label>
+<label><input id="brandOrganic" type="checkbox" style="width:auto"> Promoting my own brand/business</label>
+<label><input id="brandContent" type="checkbox" style="width:auto"> Paid partnership / promoting a third-party brand</label>
+<label><input id="isAigc" type="checkbox" style="width:auto"> AI-generated content disclosure</label>
+<button onclick="return schedule()">Schedule</button>
 
 <pre id="scheduleResult"></pre>
 </div>
@@ -344,15 +368,25 @@ Private • local AI • official platform APIs • no billing system
 <div class="card">
 <h2><span class="section-number">9.</span> Publishing History</h2>
 
-<button onclick="loadJobs()">Refresh Jobs</button>
+<button onclick="return loadJobs()">Refresh Jobs</button>
 
 <div id="jobs"></div>
 </div>
 
+<div class="card"><h2>Local Processing History</h2>
+<button onclick="return loadTasks()">Refresh Tasks</button><div id="tasks"></div></div>
 <script>
 const $ = id => document.getElementById(id);
+let draftId = null;
+let captionOwner = null;
+function newDraft() {
+    draftId = null;
+    setContentId("");
+    ["title", "description", "hashtags", "keywords", "voiceText"].forEach(id => $(id).value = "");
+}
 
-async function req(url, options = {}) {
+
+async function rawReq(url, options = {}) {
     const response = await fetch(url, options);
 
     let data;
@@ -364,13 +398,83 @@ async function req(url, options = {}) {
     }
 
     if (!response.ok) {
-        throw Error(data.detail || JSON.stringify(data));
+        throw Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail || data));
     }
 
     return data;
 }
 
+// Expensive actions are durable server tasks. Leaving/reloading the page does not cancel them.
+async function req(url, options = {}) {
+    const parsed = new URL(url, location.origin);
+    const match = parsed.pathname.match(/^\/api\/content\/(\d+)\/(generate|metadata|translate|voice-captions|render)$/);
+    if (options.method === "POST" && (match || parsed.pathname === "/api/voice")) {
+        const body = options.body ? JSON.parse(options.body) : {};
+        const content_id = match ? Number(match[1]) : body.content_id;
+        const action = match ? match[2] : "voice";
+        delete body.content_id;
+        for (const [key, value] of parsed.searchParams) body[key] = key === "metadata" ? value === "true" : value;
+        const task = await rawReq("/api/tasks", {method: "POST", headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({content_id, action, options: body})});
+        await loadTasks();
+        for (;;) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            const state = await rawReq(`/api/tasks/${task.id}`);
+            if (state.status === "FAILED") { await loadTasks(); throw Error(state.error); }
+            if (state.status === "SUCCEEDED") { await loadTasks(); return state.result; }
+        }
+    }
+    return rawReq(url, options);
+}
+
+let accountProfiles = [];
+let voiceProfiles = [];
+async function loadAccounts() {
+    try { accountProfiles = await rawReq("/api/accounts"); refreshAccountOptions(); }
+    catch (error) { $("scheduleResult").textContent = error.message; }
+}
+function refreshAccountOptions() {
+    $("scheduleAccount").innerHTML = accountProfiles.filter(a => a.platform === $("schedulePlatform").value && !a.invalid)
+        .map(a => `<option value="${escapeAttribute(a.key)}">${escapeHtml(a.name)}</option>`).join("");
+    $("tiktokConsent").checked = false;
+    $("tiktokPrivacy").innerHTML = '<option value="">Load this creator and select privacy</option>';
+}
+async function connectTikTok() {
+    try {
+        if ($("schedulePlatform").value !== "tiktok") throw Error("Select TikTok and its account first.");
+        const result = await rawReq(`/api/tiktok/oauth/start?account_key=${encodeURIComponent($("scheduleAccount").value)}`, {method: "POST"});
+        location.assign(result.authorization_url);
+    } catch (error) { $("creatorResult").textContent = error.message; }
+}
+function updateSpeakers() {
+    const voice = voiceProfiles.find(v => v.voice_id === $("voice").value);
+    $("speaker").innerHTML = '<option value="">Default speaker</option>' + Object.entries(voice?.speakers || {})
+        .map(([name, id]) => `<option value="${Number(id)}">${escapeHtml(name)}</option>`).join("");
+}
+async function loadTasks() {
+    try {
+        const tasks = await rawReq("/api/tasks");
+        $("tasks").innerHTML = tasks.map(t => `<div class="job">#${t.id} Content ${t.content_id}: ${escapeHtml(t.action)} — ${escapeHtml(t.status)}
+            <div>${escapeHtml(t.error)}</div><button onclick="viewTask(${t.id})">View result</button>
+            ${t.status === "FAILED" ? `<button onclick="retryTask(${t.id})">Retry as new task</button>` : ""}</div>`).join("");
+    } catch (error) { $("tasks").textContent = error.message; }
+}
+async function viewTask(id) {
+    try { alert(JSON.stringify(await rawReq(`/api/tasks/${id}`), null, 2)); }
+    catch (error) { alert(error.message); }
+}
+async function retryTask(id) {
+    try { await rawReq(`/api/tasks/${id}/retry`, {method: "POST"}); await loadTasks(); }
+    catch (error) { alert(error.message); }
+}
+
 function setContentId(id) {
+    if (String($("captionContent").value) !== String(id)) {
+        captionOwner = null;
+        renderCaptionEditor([]);
+        $("finalPreview").style.display = "none";
+        $("voiceText").value = "";
+    }
     [
         "contentId",
         "captionContent",
@@ -384,6 +488,8 @@ function setContentId(id) {
 }
 
 function showVideoPreview(mediaId) {
+    $("sourceImage").style.display = "none";
+    $("sourceVideo").style.display = "block";
     if (!mediaId) return;
 
     $("sourceVideo").src = `/api/media/${mediaId}`;
@@ -411,9 +517,7 @@ async function upload() {
         $("uploadResult").textContent =
             JSON.stringify(data, null, 2);
 
-        if (data.media_type === "video") {
-            showVideoPreview(data.id);
-        }
+        selectMedia(data.id, data.media_type);
 
         loadMedia();
 
@@ -452,15 +556,22 @@ async function loadMedia() {
 function selectMedia(id, type) {
     $("mediaId").value = id;
 
+    $("mediaPreview").style.display = "none";
     if (type === "video") {
         showVideoPreview(id);
+    } else {
+        $("sourceVideo").pause(); $("sourceVideo").removeAttribute("src");
+        $("sourceVideo").style.display = "none";
+        $("sourceImage").src = `/api/media/${id}`;
+        $("sourceImage").style.display = "block";
+        $("mediaPreview").style.display = "block";
     }
 }
 
 async function createContent() {
     try {
-        const data = await req("/api/content", {
-            method: "POST",
+        const data = await req(draftId ? `/api/content/${draftId}` : "/api/content", {
+            method: draftId ? "PATCH" : "POST",
             headers: {
                 "Content-Type": "application/json"
             },
@@ -474,6 +585,7 @@ async function createContent() {
             })
         });
 
+        draftId = data.id;
         setContentId(data.id);
 
         $("contentResult").textContent =
@@ -492,14 +604,10 @@ async function loadContent() {
             throw Error("Enter Content ID.");
         }
 
-        const items = await req("/api/content");
-
-        const content = items.find(item => item.id === id);
-
-        if (!content) {
-            throw Error("Content not found.");
-        }
-
+        const content = await req(`/api/content/${id}`);
+        draftId = id;
+        setContentId(id);
+        $("voiceText").value = content.translated_text || content.transcript || "";
         $("mediaId").value = content.media_id || "";
         $("target").value = content.target_language || "en";
         $("title").value = content.title || "";
@@ -508,7 +616,8 @@ async function loadContent() {
         $("keywords").value = content.keywords || "";
 
         if (content.media_id) {
-            showVideoPreview(content.media_id);
+            const media = (await req("/api/media")).find(m => m.id === content.media_id);
+            if (media) selectMedia(media.id, media.media_type);
         }
 
         $("contentResult").textContent =
@@ -519,7 +628,7 @@ async function loadContent() {
     }
 }
 
-async function generate() {
+async function generate(withMetadata = true) {
     try {
         const id = Number($("contentId").value);
 
@@ -528,7 +637,7 @@ async function generate() {
         }
 
         const data = await req(
-            `/api/content/${id}/generate?platform=${encodeURIComponent($("platform").value)}`,
+            `/api/content/${id}/generate?metadata=${withMetadata}&platform=${encodeURIComponent($("platform").value)}`,
             {
                 method: "POST"
             }
@@ -539,11 +648,25 @@ async function generate() {
         $("aiResult").textContent =
             JSON.stringify(data, null, 2);
 
+        ["title", "description", "hashtags", "keywords"].forEach(key => {
+            if (data[key] !== undefined) $(key).value = data[key];
+        });
+        $("voiceText").value = data.transcript || data.text || "";
         await loadCaptions();
 
     } catch (error) {
         $("aiResult").textContent = error.message;
     }
+}
+
+async function metadataOnly() {
+    try {
+        const id = Number($("contentId").value);
+        if (!id) throw Error("Enter Content ID.");
+        const data = await req(`/api/content/${id}/metadata?platform=${encodeURIComponent($("platform").value)}`, {method: "POST"});
+        ["title", "description", "hashtags", "keywords"].forEach(key => $(key).value = data[key]);
+        $("aiResult").textContent = JSON.stringify(data, null, 2);
+    } catch (error) { $("aiResult").textContent = error.message; }
 }
 
 async function translateText() {
@@ -575,9 +698,10 @@ async function translateText() {
 async function loadVoices() {
     try {
         const voices = await req("/api/voices");
+        voiceProfiles = voices;
 
         $("voice").innerHTML =
-            '<option value="">Default voice</option>' +
+            (voices.length ? '<option value="">Configured default voice</option>' : '<option value="">No installed voice models</option>') +
             voices.map(voice => `
                 <option value="${escapeAttribute(voice.voice_id)}">
                     ${escapeHtml(voice.name)} — ${escapeHtml(voice.gender)}
@@ -611,7 +735,8 @@ async function makeVoice() {
             body: JSON.stringify({
                 content_id: id,
                 text: text,
-                voice_id: $("voice").value || null
+                voice_id: $("voice").value || null,
+                speaker_id: $("speaker").value === "" ? null : Number($("speaker").value)
             })
         });
 
@@ -634,6 +759,7 @@ async function loadCaptions() {
         const captions =
             await req(`/api/content/${id}/captions`);
 
+        captionOwner = id;
         renderCaptionEditor(captions);
 
         $("captionResult").textContent =
@@ -679,7 +805,7 @@ function renderCaptionEditor(captions) {
 
                 <button
                     class="danger"
-                    onclick="removeCaption(${index})"
+                    onclick="this.closest('.caption-row').remove()"
                 >
                     Delete
                 </button>
@@ -771,6 +897,7 @@ async function saveCaptions() {
             throw Error("Enter Content ID.");
         }
 
+        if (captionOwner !== id) throw Error("Load captions for this Content ID before saving.");
         const captions = getCaptionData();
 
         for (const caption of captions) {
@@ -827,6 +954,8 @@ async function render() {
                 },
                 body: JSON.stringify({
                     content_id: id,
+                    image_duration: Number($("imageDuration").value),
+                    narration_policy: $("narrationPolicy").value,
                     use_voiceover:
                         $("useVoice").value === "true",
                     burn_subtitles:
@@ -852,6 +981,31 @@ async function render() {
     } catch (error) {
         $("renderResult").textContent = error.message;
     }
+}
+
+async function voiceCaptions() {
+    try {
+        const id = Number($("voiceContent").value);
+        if (!id) throw Error("Enter Content ID.");
+        const data = await req(`/api/content/${id}/voice-captions`, {method: "POST"});
+        $("captionContent").value = id;
+        await loadCaptions();
+        $("voiceResult").textContent = JSON.stringify(data, null, 2);
+    } catch (error) { $("voiceResult").textContent = error.message; }
+}
+
+async function loadCreator() {
+    try {
+        if ($("schedulePlatform").value !== "tiktok") throw Error("Select TikTok and its account first.");
+        const info = await req(`/api/tiktok/creator?account_key=${encodeURIComponent($("scheduleAccount").value)}`);
+        for (const [id, field] of [["disableComment", "comment_disabled"], ["disableDuet", "duet_disabled"], ["disableStitch", "stitch_disabled"]]) {
+            $(id).disabled = Boolean(info[field]); $(id).checked = true;
+        }
+        $("creatorResult").textContent = JSON.stringify(info, null, 2);
+        $("tiktokPrivacy").innerHTML = '<option value="">Select privacy explicitly</option>' +
+            (info.privacy_level_options || []).map(value => `<option value="${escapeAttribute(value)}">${escapeHtml(value)}</option>`).join("");
+        $("tiktokConsent").checked = false;
+    } catch (error) { $("creatorResult").textContent = error.message; }
 }
 
 async function schedule() {
@@ -883,6 +1037,17 @@ async function schedule() {
                 },
                 body: JSON.stringify({
                     content_id: id,
+                    privacy_level: $("tiktokPrivacy").value || null,
+                    consent: $("tiktokConsent").checked,
+                    account_key: $("scheduleAccount").value || "default",
+                    facebook_mode: $("facebookMode").value,
+                    youtube_privacy: $("youtubePrivacy").value,
+                    disable_comment: $("disableComment").checked,
+                    disable_duet: $("disableDuet").checked,
+                    disable_stitch: $("disableStitch").checked,
+                    brand_content_toggle: $("brandContent").checked,
+                    brand_organic_toggle: $("brandOrganic").checked,
+                    is_aigc: $("isAigc").checked,
                     platform:
                         $("schedulePlatform").value,
                     publish_at:
@@ -896,6 +1061,7 @@ async function schedule() {
         $("scheduleResult").textContent =
             JSON.stringify(data, null, 2);
 
+        $("tiktokConsent").checked = false;
         await loadJobs();
 
     } catch (error) {
@@ -924,7 +1090,7 @@ async function loadJobs() {
                 Content: ${job.content_id}
 
                 <br>
-                Publish: ${escapeHtml(job.publish_at)}
+                Publish (UTC): ${escapeHtml(job.publish_at)}
 
                 <br>
                 Attempts:
@@ -943,8 +1109,11 @@ async function loadJobs() {
                 }
 
                 <div class="actions">
+                    <button class="secondary" onclick="showAttempts(${job.id})">Attempt history</button>
+                    ${job.status === "REVIEW_REQUIRED" ? `<button class="secondary" onclick="reconcileJob(${job.id})">Reconcile outcome</button>` : ""}
                     <button
                         onclick="retryJob(${job.id})"
+                        ${job.status !== "FAILED" || job.external_id ? "disabled" : ""}
                     >
                         Retry now
                     </button>
@@ -952,6 +1121,7 @@ async function loadJobs() {
                     <button
                         class="danger"
                         onclick="deleteJob(${job.id})"
+                        ${job.status !== "QUEUED" || job.attempts ? "disabled" : ""}
                     >
                         Delete
                     </button>
@@ -962,6 +1132,24 @@ async function loadJobs() {
     } catch (error) {
         $("jobs").textContent = error.message;
     }
+}
+
+async function showAttempts(id) {
+    try { alert(JSON.stringify(await req(`/api/jobs/${id}/attempts`), null, 2)); }
+    catch (error) { alert(error.message); }
+}
+
+async function reconcileJob(id) {
+    const outcome = prompt("Check the platform's publishing history first. Type published or not published to confirm the verified outcome.");
+    if (!["published", "not published"].includes(outcome)) return;
+    const external_id = outcome === "published" ? prompt("Verified platform post/video ID:") : "";
+    const note = prompt("Describe how you verified this outcome (at least 10 characters):");
+    if (!note) return;
+    try {
+        await req(`/api/jobs/${id}/reconcile`, {method: "POST", headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({published: outcome === "published", external_id: external_id || "", note})});
+        await loadJobs();
+    } catch (error) { alert(error.message); }
 }
 
 async function retryJob(id) {
@@ -1013,9 +1201,24 @@ function escapeAttribute(value) {
     return escapeHtml(value);
 }
 
+// Serialize user actions and show progress; avoid double upload/schedule clicks.
+document.querySelectorAll("button[onclick]").forEach(button => {
+    const action = button.onclick;
+    button.onclick = async function(event) {
+        const label = button.textContent;
+        button.disabled = true;
+        button.textContent = "Working…";
+        try { await action.call(button, event); }
+        finally { button.disabled = false; button.textContent = label; }
+    };
+});
 loadVoices();
 loadMedia();
 loadJobs();
+loadAccounts();
+loadTasks();
+$("scheduleContent").addEventListener("input", () => $("tiktokConsent").checked = false);
+$("scheduleAccount").addEventListener("change", () => { $("tiktokConsent").checked = false; $("tiktokPrivacy").innerHTML = '<option value="">Load creator again</option>'; });
 </script>
 
 </main>

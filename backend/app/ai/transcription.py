@@ -1,4 +1,7 @@
 import json
+import shutil
+import os
+import math
 import subprocess
 import tempfile
 from pathlib import Path
@@ -7,9 +10,9 @@ from ..config import settings
 
 
 def _resolve_whisper_binary() -> Path:
-    binary = Path(settings.whisper_binary)
+    binary = Path(shutil.which(settings.whisper_binary) or settings.whisper_binary).resolve()
 
-    if not binary.is_file():
+    if not binary.is_file() or not os.access(binary, os.X_OK):
         raise RuntimeError(
             f"Whisper binary not found: {binary}"
         )
@@ -37,6 +40,7 @@ def _run_command(
             check=True,
             capture_output=True,
             text=True,
+            timeout=settings.process_timeout,
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
@@ -51,7 +55,7 @@ def _run_command(
         )
 
         raise RuntimeError(
-            f"Command failed: {details}"
+            "Audio extraction or Whisper failed. Verify the input audio and installed binary/model compatibility."
         ) from exc
 
     return result
@@ -65,6 +69,7 @@ def _extract_audio(
         [
             settings.ffmpeg_bin,
             "-y",
+            "-protocol_whitelist", "file,pipe",
             "-i",
             input_path,
             "-vn",
@@ -100,65 +105,52 @@ def _parse_whisper_json(
             "Unable to read Whisper JSON output."
         ) from exc
 
-    transcript = str(
-        data.get("transcription", "")
-    ).strip()
-
+    if not isinstance(data, dict):
+        raise RuntimeError("Whisper JSON must be an object.")
+    # whisper.cpp full JSON uses a transcription ARRAY, not segments.
+    segments = data.get("transcription", data.get("segments", []))
+    if not isinstance(segments, list):
+        raise RuntimeError("Unsupported Whisper JSON: expected transcription segments.")
+    transcript = "".join(str(s.get("text", "")) for s in segments if isinstance(s, dict)).strip()
     words = []
-
-    segments = data.get("segments", [])
-
-    if isinstance(segments, list):
-        for segment in segments:
-            if not isinstance(segment, dict):
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        tokens = segment.get("tokens")
+        if not isinstance(tokens, list):
+            raise RuntimeError("Whisper full JSON has an invalid tokens array.")
+        for token in tokens:
+            if not isinstance(token, dict):
                 continue
-
-            tokens = segment.get("tokens", [])
-
-            if not isinstance(tokens, list):
+            text = token.get("text", "")
+            if not isinstance(text, str) or not text.strip() or text.strip().startswith("[_"):
                 continue
+            offsets = token.get("offsets") or {}
+            if not isinstance(offsets, dict):
+                continue
+            start, end = offsets.get("from"), offsets.get("to")
+            if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+                continue
+            if not math.isfinite(start) or not math.isfinite(end):
+                continue
+            start, end = int(start), int(end)
+            if start < 0 or end <= start:
+                continue
+            # Tokens are subwords. Leading whitespace starts a new word.
+            if words and not text[0].isspace():
+                words[-1]["text"] += text.strip()
+                words[-1]["end_ms"] = max(words[-1]["end_ms"], end)
+            else:
+                start = max(start, words[-1]["end_ms"] if words else 0)
+                if end > start:
+                    words.append({"text": text.strip(), "start_ms": start, "end_ms": end})
+    if not transcript:
+        raise RuntimeError("Whisper detected no speech. Check the audio track and model.")
+    if not words:
+        raise RuntimeError("Whisper returned no valid token timestamps. Use whisper.cpp full JSON output.")
 
-            for token in tokens:
-                if not isinstance(token, dict):
-                    continue
-
-                text = str(
-                    token.get("text", "")
-                )
-
-                if not text.strip():
-                    continue
-
-                start = token.get("offsets", {}).get(
-                    "from"
-                )
-                end = token.get("offsets", {}).get(
-                    "to"
-                )
-
-                if start is None or end is None:
-                    continue
-
-                word = text.strip()
-
-                if not word:
-                    continue
-
-                # Ignore Whisper special tokens.
-                if word.startswith("[") and word.endswith("]"):
-                    continue
-
-                words.append(
-                    {
-                        "text": word,
-                        "start_ms": int(start),
-                        "end_ms": int(end),
-                    }
-                )
-
-    language = data.get("result", {}).get(
-        "language"
-    )
+    result = data.get("result") or {}
+    language = result.get("language") if isinstance(result, dict) else None
 
     if not language:
         language = data.get("language")

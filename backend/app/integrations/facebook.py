@@ -1,4 +1,5 @@
 import httpx
+from urllib.parse import urlsplit
 
 from ..config import settings
 
@@ -45,18 +46,8 @@ class FacebookPublisher:
         except ValueError:
             data = {}
 
-        if not response.is_success:
-            message = (
-                data.get("error", {}).get("message")
-                if isinstance(data, dict)
-                else None
-            )
-
-            raise RuntimeError(
-                f"Facebook {action} failed: "
-                f"{message or response.text}"
-            )
-
+        if not response.is_success or not isinstance(data, dict) or data.get("error"):
+            raise RuntimeError(f"Facebook {action} failed (HTTP {response.status_code}). Check token permissions, media eligibility and Page dashboard.")
         return data
 
     def publish_post(
@@ -171,23 +162,17 @@ class FacebookPublisher:
             media_path
         )
 
+        upload_url = init_data.get("upload_url", "")
+        parsed = urlsplit(upload_url)
+        if parsed.scheme != "https" or parsed.hostname != "rupload.facebook.com" or parsed.username:
+            raise RuntimeError("Facebook returned an invalid Reel upload URL")
         with open(media_path, "rb") as media:
             upload_response = httpx.post(
-                f"{self.base}/"
-                f"{settings.facebook_page_id}/"
-                f"video_reels",
-                params={
-                    **self.params,
-                    "upload_phase": "transfer",
-                    "video_id": video_id,
-                    "start_offset": 0,
-                    "end_offset": file_size,
-                },
-                content=media.read(),
-                headers={
-                    "Content-Type":
-                        "application/octet-stream",
-                },
+                upload_url,
+                content=iter(lambda: media.read(1024 * 1024), b""),
+                headers={"Authorization": f"OAuth {settings.facebook_page_access_token}",
+                         "offset": "0", "file_size": str(file_size),
+                         "Content-Type": "application/octet-stream", "Content-Length": str(file_size)},
                 timeout=900,
             )
 
@@ -215,6 +200,9 @@ class FacebookPublisher:
             "Reel publishing",
         )
 
+        if finish_data.get("success") is not True:
+            raise RuntimeError("Facebook did not confirm Reel publishing")
+
         external_id = (
             finish_data.get("video_id")
             or finish_data.get("id")
@@ -222,3 +210,12 @@ class FacebookPublisher:
         )
 
         return str(external_id)
+
+
+    def get_status(self, video_id: str) -> dict:
+        response = httpx.get(f"{self.base}/{video_id}", params={"fields": "status", **self.params}, timeout=60)
+        data = self._raise_for_response(response, "video status")
+        status = data.get("status")
+        if not isinstance(status, dict):
+            raise RuntimeError("Facebook returned no video processing status")
+        return status

@@ -1,14 +1,30 @@
 from pathlib import Path
+from contextlib import asynccontextmanager
+import secrets
+import json
+from filelock import FileLock, Timeout
+from .locking import content_locked
+from .accounts import account_context, list_accounts, profile
+from .tasks import current_task_id
+import subprocess
+import tempfile
+import shutil
+from urllib.parse import urlsplit
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from .errors import public_error
 from uuid import uuid4
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, UploadFile, File, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from .config import settings
 from .db import init_db, get_db
-from .models import Media, Content, Job, Caption, PlatformAccount
+from .models import Media, Content, Job, Caption, PlatformAccount, PublicationAttempt, MediaTask
 from .schemas import (
     ContentCreate,
     ContentUpdate,
@@ -16,23 +32,116 @@ from .schemas import (
     VoiceRequest,
     CaptionSaveRequest,
     RenderRequest,
+    ReconcileRequest,
+    TaskRequest,
 )
-from .scheduler import start_scheduler
+from .scheduler import start_scheduler, scheduler
 from .ai.content import generate_metadata
 from .ai.transcription import transcribe
 from .ai.translation import translate_text
 from .ai.tts import synthesize, list_voices
-from .media import replace_audio, burn_subtitles, captions_to_srt
+from .media import replace_audio, burn_subtitles, captions_to_srt, probe, normalize_video, image_to_video
 from .integrations.tiktok import creator_info
 
 
-app = FastAPI(title=settings.app_name)
+security = HTTPBasic(auto_error=False)
+
+
+def authenticate(credentials: HTTPBasicCredentials | None = Depends(security)):
+    if not settings.auth_password:
+        raise HTTPException(503, "Set AUTH_PASSWORD before using the application.")
+    if not credentials or not (secrets.compare_digest(credentials.username.encode(), settings.auth_username.encode())
+            and secrets.compare_digest(credentials.password.encode(), settings.auth_password.encode())):
+        raise HTTPException(401, "Owner authentication required", headers={"WWW-Authenticate": "Basic"})
+
+
+@asynccontextmanager
+async def lifespan(app):
+    lock_path = Path(settings.runtime_lock_file)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = FileLock(str(lock_path))
+    try:
+        lock.acquire(timeout=0)
+    except Timeout as exc:
+        raise RuntimeError("Another application process is using this runtime. Run exactly one Uvicorn worker sharing this lock file.") from exc
+    try:
+        init_db()
+        if settings.scheduler_enabled:
+            start_scheduler()
+        yield
+    finally:
+        if scheduler.running:
+            scheduler.shutdown(wait=True)
+        lock.release()
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan, dependencies=[Depends(authenticate)],
+              docs_url=None, redoc_url=None, openapi_url=None)
+
+
+@app.middleware("http")
+async def same_origin(request: Request, call_next):
+    origin = request.headers.get("origin")
+    if request.method not in {"GET", "HEAD", "OPTIONS"} and (request.headers.get("sec-fetch-site") == "cross-site" or (origin and urlsplit(origin).netloc != request.headers.get("host"))):
+        return JSONResponse(status_code=403, content={"detail": "Cross-origin mutations are not allowed"})
+    if request.url.path in {"/health", "/api/health"}:
+        return JSONResponse({"status": "ok"})
+    # Authenticate before multipart parsing or any request body buffering.
+    try:
+        authenticate(await security(request))
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers)
+    if request.url.path == "/api/media" and request.method == "POST":
+        length = request.headers.get("content-length")
+        if length and (not length.isdecimal() or int(length) > settings.max_upload_mb * 1024 * 1024 + 1024 * 1024):
+            return JSONResponse(status_code=413, content={"detail": "Upload exceeds the configured request limit"})
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.exception_handler(RuntimeError)
+async def dependency_error(request, exc):
+    return JSONResponse(status_code=503, content={"detail": public_error(exc)})
+
+
+@app.exception_handler(ValueError)
+async def input_error(request, exc):
+    return JSONResponse(status_code=400, content={"detail": public_error(exc)})
+
+
+@app.exception_handler(subprocess.TimeoutExpired)
+async def timeout_error(request, exc):
+    return JSONResponse(status_code=504, content={"detail": "Local processing timed out. Check model size and PROCESS_TIMEOUT."})
+
+
+@app.exception_handler(Exception)
+async def unexpected_error(request, exc):
+    return JSONResponse(status_code=500, content={"detail": "Operation failed unexpectedly. Check server configuration and service availability."})
+
+
+def public_record(item):
+    return {column.name: getattr(item, column.name) for column in item.__table__.columns
+            if column.name not in {"path", "voice_path", "rendered_media_path", "model_path", "caption_audio_path"}}
+
 
 MEDIA_ROOT = Path(settings.media_dir).resolve()
 
 Path(settings.media_dir).mkdir(parents=True, exist_ok=True)
 Path("./data").mkdir(exist_ok=True)
 Path("./secrets").mkdir(exist_ok=True)
+
+
+def require_editable(db: Session, content_id: int):
+    active = db.query(MediaTask).filter(MediaTask.content_id == content_id,
+            MediaTask.status.in_(["QUEUED", "RUNNING"]))
+    if current_task_id.get() is not None:
+        active = active.filter(MediaTask.id != current_task_id.get())
+    if active.first():
+        raise HTTPException(409, "Wait for this content's queued local processing task to finish")
+    if db.query(Job).filter(Job.content_id == content_id, Job.status.in_(["QUEUED", "PUBLISHING", "REVIEW_REQUIRED"])).first():
+        raise HTTPException(409, "Content is queued or publishing. Cancel the unattempted queue job or reconcile its outcome before editing.")
 
 
 def _safe_media_path(path: str) -> Path:
@@ -63,12 +172,6 @@ def _utc_naive(value: datetime) -> datetime:
         return value
 
     return value.astimezone(timezone.utc).replace(tzinfo=None)
-
-
-@app.on_event("startup")
-def startup():
-    init_db()
-    start_scheduler()
 
 
 @app.get("/")
@@ -108,7 +211,7 @@ async def upload_media(
             "Only video/image files are allowed",
         )
 
-    original_filename = file.filename or "upload"
+    original_filename = Path((file.filename or "upload").replace("\\", "/")).name
     ext = Path(original_filename).suffix.lower()
 
     allowed_extensions = {
@@ -163,7 +266,7 @@ async def upload_media(
         path.unlink(missing_ok=True)
         raise HTTPException(
             500,
-            f"Failed to save uploaded media: {exc}",
+            "Failed to save uploaded media. Check storage space and directory permissions.",
         ) from exc
 
     finally:
@@ -175,6 +278,23 @@ async def upload_media(
         else "image"
     )
 
+    try:
+        from starlette.concurrency import run_in_threadpool
+        info = await run_in_threadpool(probe, str(path))
+        streams = [stream for stream in info["streams"] if stream.get("codec_type") == "video"]
+        image_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+        expected_type = "image" if ext in image_exts else "video"
+        if not streams or expected_type != media_type:
+            raise ValueError("File extension, MIME type, and readable media must agree.")
+        image_codecs = {".jpg": "mjpeg", ".jpeg": "mjpeg", ".png": "png", ".webp": "webp", ".gif": "gif"}
+        if ext in image_codecs and streams[0].get("codec_name") != image_codecs[ext]:
+            raise ValueError("Image content does not match its extension.")
+        if media_type == "video" and float(info.get("format", {}).get("duration", 0)) <= 0:
+            raise ValueError("Video must have a positive duration.")
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
     item = Media(
         filename=original_filename,
         path=str(path),
@@ -182,9 +302,14 @@ async def upload_media(
         mime_type=file.content_type,
     )
 
-    db.add(item)
-    db.commit()
-    db.refresh(item)
+    try:
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+    except Exception:
+        db.rollback()
+        path.unlink(missing_ok=True)
+        raise
 
     return {
         "id": item.id,
@@ -196,11 +321,7 @@ async def upload_media(
 
 @app.get("/api/media")
 def list_media(db: Session = Depends(get_db)):
-    return (
-        db.query(Media)
-        .order_by(Media.id.desc())
-        .all()
-    )
+    return [public_record(item) for item in db.query(Media).order_by(Media.id.desc()).all()]
 
 
 @app.get("/api/media/{media_id}")
@@ -253,24 +374,30 @@ def create_content(
     db.commit()
     db.refresh(item)
 
-    return item
+    return public_record(item)
 
 
 @app.get("/api/content")
 def list_content(db: Session = Depends(get_db)):
-    return (
-        db.query(Content)
-        .order_by(Content.id.desc())
-        .all()
-    )
+    return [public_record(item) for item in db.query(Content).order_by(Content.id.desc()).all()]
+
+
+@app.get("/api/content/{content_id}")
+def get_content(content_id: int, db: Session = Depends(get_db)):
+    item = db.get(Content, content_id)
+    if not item:
+        raise HTTPException(404, "Content not found")
+    return public_record(item)
 
 
 @app.patch("/api/content/{content_id}")
+@content_locked
 def update_content(
     content_id: int,
     payload: ContentUpdate,
     db: Session = Depends(get_db),
 ):
+    require_editable(db, content_id)
     item = db.get(Content, content_id)
 
     if not item:
@@ -295,21 +422,30 @@ def update_content(
                 "Media not found",
             )
 
+    if any(value is None for key, value in updates.items() if key != "media_id"):
+        raise HTTPException(422, "Content text fields cannot be null")
+    if "media_id" in updates and updates["media_id"] != item.media_id:
+        item.transcript = item.translated_text = item.voice_path = item.rendered_media_path = ""
+        item.source_language = item.caption_audio_path = ""
+        db.query(Caption).filter(Caption.content_id == item.id).delete()
     for key, value in updates.items():
         setattr(item, key, value)
 
     db.commit()
     db.refresh(item)
 
-    return item
+    return public_record(item)
 
 
 @app.post("/api/content/{content_id}/generate")
+@content_locked
 def generate(
     content_id: int,
     platform: str = "general",
+    metadata: bool = True,
     db: Session = Depends(get_db),
 ):
+    require_editable(db, content_id)
     content = db.get(
         Content,
         content_id,
@@ -352,17 +488,10 @@ def generate(
         str(media_path)
     )
 
-    generated = generate_metadata(
-        result["text"],
-        platform,
-    )
-
     content.transcript = result["text"]
     content.source_language = result["language"]
-    content.title = generated["title"]
-    content.description = generated["description"]
-    content.hashtags = generated["hashtags"]
-    content.keywords = generated["keywords"]
+    content.caption_audio_path = str(media_path)
+    content.translated_text = content.voice_path = content.rendered_media_path = ""
 
     db.query(Caption).filter(
         Caption.content_id == content.id
@@ -376,14 +505,17 @@ def generate(
             Caption(
                 content_id=content.id,
                 start_ms=start_ms,
-                end_ms=max(
-                    end_ms,
-                    start_ms + 50,
-                ),
+                end_ms=end_ms,
                 text=word["text"].strip(),
             )
         )
 
+    db.commit()
+    if not metadata:
+        return result
+    generated = generate_metadata(result["text"], platform)
+    for key, value in generated.items():
+        setattr(content, key, value)
     db.commit()
 
     return {
@@ -394,12 +526,45 @@ def generate(
     }
 
 
+@app.post("/api/content/{content_id}/voice-captions")
+@content_locked
+def voice_captions(content_id: int, db: Session = Depends(get_db)):
+    require_editable(db, content_id)
+    content = db.get(Content, content_id)
+    if not content or not content.voice_path:
+        raise HTTPException(400, "Generate voice-over first")
+    result = transcribe(str(_safe_media_path(content.voice_path)))
+    db.query(Caption).filter(Caption.content_id == content_id).delete()
+    for word in result["words"]:
+        db.add(Caption(content_id=content_id, **word))
+    content.caption_audio_path = content.voice_path
+    content.rendered_media_path = ""
+    db.commit()
+    return result
+
+
+@app.post("/api/content/{content_id}/metadata")
+@content_locked
+def metadata(content_id: int, platform: str = "general", db: Session = Depends(get_db)):
+    require_editable(db, content_id)
+    content = db.get(Content, content_id)
+    if not content:
+        raise HTTPException(404, "Content not found")
+    generated = generate_metadata(content.transcript, platform)
+    for key, value in generated.items():
+        setattr(content, key, value)
+    db.commit()
+    return generated
+
+
 @app.post("/api/content/{content_id}/translate")
+@content_locked
 def translate(
     content_id: int,
     target: str = "en",
     db: Session = Depends(get_db),
 ):
+    require_editable(db, content_id)
     content = db.get(
         Content,
         content_id,
@@ -419,10 +584,9 @@ def translate(
             "Target language is required",
         )
 
-    source = (
-        content.source_language
-        or "en"
-    )
+    source = content.source_language
+    if not source:
+        raise HTTPException(400, "Source language is unknown. Regenerate transcription with language detection.")
 
     translated = translate_text(
         content.transcript,
@@ -430,6 +594,7 @@ def translate(
         target,
     )
 
+    content.voice_path = content.rendered_media_path = ""
     content.target_language = target
     content.translated_text = translated
 
@@ -444,14 +609,16 @@ def translate(
 
 @app.get("/api/voices")
 def voices():
-    return list_voices()
+    return [{k: v for k, v in voice.items() if k != "model_path"} for voice in list_voices()]
 
 
 @app.post("/api/voice")
+@content_locked
 def voice(
     payload: VoiceRequest,
     db: Session = Depends(get_db),
 ):
+    require_editable(db, payload.content_id)
     content = db.get(
         Content,
         payload.content_id,
@@ -495,12 +662,13 @@ def voice(
         / f"voice_{content.id}_{uuid4().hex[:8]}.wav"
     )
 
-    synthesize(
-        payload.text,
-        str(output),
-        model,
-    )
+    try:
+        synthesize(payload.text, str(output), model, speaker_id=payload.speaker_id)
+    except Exception:
+        output.unlink(missing_ok=True)
+        raise
 
+    content.rendered_media_path = ""
     content.voice_path = str(output)
     content.voice_id = (
         payload.voice_id
@@ -510,9 +678,20 @@ def voice(
     db.commit()
 
     return {
-        "path": str(output),
+        "audio_url": f"/api/content/{content.id}/voice",
         "voice_id": content.voice_id,
     }
+
+
+@app.get("/api/content/{content_id}/voice")
+def voice_audio(content_id: int, db: Session = Depends(get_db)):
+    content = db.get(Content, content_id)
+    if not content or not content.voice_path:
+        raise HTTPException(404, "Voice audio not available")
+    path = _safe_media_path(content.voice_path)
+    if not path.is_file():
+        raise HTTPException(404, "Voice audio file not found")
+    return FileResponse(path, media_type="audio/wav")
 
 
 @app.get("/api/content/{content_id}/captions")
@@ -540,11 +719,13 @@ def get_captions(
 
 
 @app.put("/api/content/{content_id}/captions")
+@content_locked
 def save_captions(
     content_id: int,
     payload: CaptionSaveRequest,
     db: Session = Depends(get_db),
 ):
+    require_editable(db, content_id)
     if not db.get(
         Content,
         content_id,
@@ -554,7 +735,12 @@ def save_captions(
             "Content not found",
         )
 
-    for caption in payload.captions:
+    db.get(Content, content_id).rendered_media_path = ""
+    previous_end = 0
+    for caption in sorted(payload.captions, key=lambda c: c.start_ms):
+        if not caption.text.strip() or caption.start_ms < previous_end:
+            raise HTTPException(400, "Captions require text and must not overlap or duplicate")
+        previous_end = caption.end_ms
         if caption.end_ms <= caption.start_ms:
             raise HTTPException(
                 400,
@@ -583,11 +769,13 @@ def save_captions(
 
 
 @app.post("/api/content/{content_id}/render")
+@content_locked
 def render_content(
     content_id: int,
     payload: RenderRequest,
     db: Session = Depends(get_db),
 ):
+    require_editable(db, content_id)
     content = db.get(
         Content,
         content_id,
@@ -620,103 +808,53 @@ def render_content(
             "Original media file not found",
         )
 
-    if payload.use_voiceover:
-        if media.media_type != "video":
-            raise HTTPException(
-                400,
-                "Voice-over rendering currently requires video media",
-            )
-
-        if not content.voice_path:
-            raise HTTPException(
-                400,
-                "Generate voice-over first",
-            )
-
-        voice_path = _safe_media_path(
-            content.voice_path
-        )
-
-        if not voice_path.is_file():
-            raise HTTPException(
-                404,
-                "Voice-over file not found",
-            )
-
-        output = (
-            MEDIA_ROOT
-            / f"render_{content.id}_audio.mp4"
-        )
-
-        replace_audio(
-            str(current),
-            str(voice_path),
-            str(output),
-        )
-
-        current = output
-
+    if payload.content_id != content_id:
+        raise HTTPException(400, "URL and request Content IDs must match")
+    if media.media_type == "image" and Path(media.path).suffix.lower() == ".gif":
+        raise HTTPException(400, "Animated GIF rendering is unsupported; upload a video or still image")
+    if payload.use_voiceover and not content.voice_path:
+        raise HTTPException(400, "Generate voice-over first")
     if payload.burn_subtitles:
-        captions = (
-            db.query(Caption)
-            .filter(
-                Caption.content_id == content.id
-            )
-            .order_by(Caption.start_ms)
-            .all()
-        )
-
-        if not captions:
-            raise HTTPException(
-                400,
-                "No captions available",
-            )
-
-        srt = (
-            MEDIA_ROOT
-            / f"captions_{content.id}.srt"
-        )
-
-        captions_to_srt(
-            captions,
-            str(srt),
-        )
-
-        output = (
-            MEDIA_ROOT
-            / f"render_{content.id}_final.mp4"
-        )
-
-        burn_subtitles(
-            str(current),
-            str(srt),
-            str(output),
-            payload.subtitle_font_size,
-        )
-
-        current = output
-
-    if not current.is_file():
-        raise HTTPException(
-            500,
-            "Rendered media file was not created",
-        )
-
-    content.rendered_media_path = str(
-        current
-    )
-
-    content.status = "READY"
-
-    db.commit()
-
-    return {
-        "path": str(current),
-        "status": content.status,
-        "preview_url": (
-            f"/api/content/{content.id}/rendered-media"
-        ),
-    }
+        expected_audio = content.voice_path if payload.use_voiceover else media.path
+        if (content.caption_audio_path and content.caption_audio_path != expected_audio) or (payload.use_voiceover and not content.caption_audio_path):
+            raise HTTPException(400, "Generate captions from the selected audio before rendering")
+    output = MEDIA_ROOT / f"render_{content.id}_{uuid4().hex}.mp4"
+    try:
+        with tempfile.TemporaryDirectory(prefix="render-", dir=MEDIA_ROOT) as temp:
+            temp = Path(temp)
+            normalized = temp / "normalized.mp4"
+            if media.media_type == "image":
+                image_to_video(str(current), str(normalized), payload.image_duration)
+            else:
+                normalize_video(str(current), str(normalized))
+            current = normalized
+            if payload.use_voiceover:
+                if not content.voice_path:
+                    raise HTTPException(400, "Generate voice-over first")
+                voice_path = _safe_media_path(content.voice_path)
+                if not voice_path.is_file():
+                    raise HTTPException(404, "Voice-over file not found")
+                current = Path(replace_audio(str(current), str(voice_path), str(temp / "audio.mp4"), extend_to_voice=payload.narration_policy == "extend"))
+            if payload.burn_subtitles:
+                expected_audio = content.voice_path if payload.use_voiceover else media.path
+                if content.caption_audio_path and content.caption_audio_path != expected_audio:
+                    raise HTTPException(400, "Caption timings belong to different audio. Generate captions from the selected audio before rendering.")
+                if payload.use_voiceover and not content.caption_audio_path:
+                    raise HTTPException(400, "Generate voice-over captions before burning subtitles with voice-over.")
+                captions = db.query(Caption).filter(Caption.content_id == content.id).order_by(Caption.start_ms).all()
+                if not captions:
+                    raise HTTPException(400, "No captions available")
+                srt = captions_to_srt(captions, str(temp / "captions.srt"))
+                current = Path(burn_subtitles(str(current), srt, str(temp / "final.mp4"), payload.subtitle_font_size))
+            probe(str(current))
+            shutil.move(str(current), output)
+        content.rendered_media_path = str(output)
+        content.status = "READY"
+        db.commit()
+    except Exception:
+        output.unlink(missing_ok=True)
+        raise
+    return {"status": content.status, "preview_url": f"/api/content/{content.id}/rendered-media"}
 
 
 @app.get("/api/content/{content_id}/rendered-media")
@@ -759,6 +897,7 @@ def get_rendered_media(
 
 
 @app.post("/api/schedule")
+@content_locked
 def schedule(
     payload: ScheduleCreate,
     db: Session = Depends(get_db),
@@ -773,17 +912,34 @@ def schedule(
             "Unsupported platform",
         )
 
-    content = db.get(
-        Content,
-        payload.content_id,
-    )
-
+    profile(payload.platform, payload.account_key)
+    if payload.platform == "tiktok":
+        if not payload.consent or not payload.privacy_level:
+            raise HTTPException(400, "TikTok requires explicit privacy selection and publishing consent")
+        with account_context("tiktok", payload.account_key):
+            info = creator_info()
+        if payload.privacy_level not in info.get("privacy_level_options", []):
+            raise HTTPException(400, "Selected TikTok privacy is not available for this creator")
+        if payload.brand_content_toggle and payload.privacy_level == "SELF_ONLY":
+            raise HTTPException(400, "Branded content cannot use private TikTok visibility")
+    if settings.database_url.startswith("sqlite"):
+        db.execute(text("BEGIN IMMEDIATE"))
+    if db.query(MediaTask).filter(MediaTask.content_id == payload.content_id, MediaTask.status.in_(["QUEUED", "RUNNING"])).first():
+        raise HTTPException(409, "Wait for local processing before scheduling")
+    content = db.get(Content, payload.content_id)
     if not content:
-        raise HTTPException(
-            404,
-            "Content not found",
-        )
+        raise HTTPException(404, "Content not found")
 
+    media = db.get(Media, content.media_id) if content.media_id else None
+    if not media:
+        raise HTTPException(400, "Attach media before scheduling")
+    if payload.platform in {"youtube", "tiktok"} and media.media_type != "video" and not content.rendered_media_path:
+        raise HTTPException(400, "This platform requires video")
+    if db.query(Job).filter(Job.content_id == content.id, Job.platform == payload.platform, Job.account_key == payload.account_key,
+                            Job.status.in_(["QUEUED", "PUBLISHING", "PUBLISHED", "UPLOADED", "REVIEW_REQUIRED"])).first():
+        raise HTTPException(409, "Content already has an active or published job for this platform")
+    if payload.publish_at.tzinfo is None:
+        raise HTTPException(400, "Schedule time must include a timezone offset")
     publish_at = _utc_naive(
         payload.publish_at
     )
@@ -799,6 +955,9 @@ def schedule(
         )
 
     job = Job(
+        account_key=payload.account_key,
+        options_json=json.dumps(payload.model_dump(include={"facebook_mode", "youtube_privacy", "disable_comment", "disable_duet", "disable_stitch", "brand_content_toggle", "brand_organic_toggle", "is_aigc", "consent"})),
+        privacy_level=payload.privacy_level or "",
         content_id=payload.content_id,
         platform=payload.platform,
         publish_at=publish_at,
@@ -808,8 +967,7 @@ def schedule(
     db.add(job)
     db.commit()
     db.refresh(job)
-
-    return job
+    return public_record(job)
 
 
 @app.get("/api/jobs")
@@ -824,6 +982,7 @@ def jobs(
 
 
 @app.post("/api/jobs/{job_id}/retry")
+@content_locked
 def retry_job(
     job_id: int,
     db: Session = Depends(get_db),
@@ -839,6 +998,14 @@ def retry_job(
             "Job not found",
         )
 
+    if job.status != "FAILED" or job.external_id:
+        raise HTTPException(409, "Only confirmed failed jobs without an external ID can be retried")
+    require_editable(db, job.content_id)
+    if db.query(Job).filter(Job.id != job.id, Job.content_id == job.content_id,
+            Job.platform == job.platform, Job.account_key == job.account_key,
+            Job.status.in_(["QUEUED", "PUBLISHING", "PUBLISHED", "UPLOADED", "REVIEW_REQUIRED"])).first():
+        raise HTTPException(409, "Another active or published job exists for this account and content")
+    job.max_attempts = max(job.max_attempts, job.attempts + 1)
     job.status = "QUEUED"
     job.error = ""
     job.retry_at = datetime.now(
@@ -847,10 +1014,45 @@ def retry_job(
 
     db.commit()
 
-    return job
+    db.refresh(job)
+    return public_record(job)
+
+
+@app.get("/api/jobs/{job_id}/attempts")
+def attempts(job_id: int, db: Session = Depends(get_db)):
+    if not db.get(Job, job_id):
+        raise HTTPException(404, "Job not found")
+    return db.query(PublicationAttempt).filter(PublicationAttempt.job_id == job_id).order_by(PublicationAttempt.id).all()
+
+
+@app.post("/api/jobs/{job_id}/reconcile")
+@content_locked
+def reconcile(job_id: int, payload: ReconcileRequest, db: Session = Depends(get_db)):
+    job = db.get(Job, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if job.status != "REVIEW_REQUIRED":
+        raise HTTPException(409, "Only uncertain publication outcomes can be reconciled")
+    if payload.published and not payload.external_id.strip():
+        raise HTTPException(400, "Provide the verified platform post/video ID")
+    job.status = "PUBLISHED" if payload.published else "FAILED"
+    job.external_id = payload.external_id.strip() if payload.published else ""
+    job.error = "Owner reconciled: " + public_error(payload.note)
+    attempt = db.query(PublicationAttempt).filter(PublicationAttempt.job_id == job.id).order_by(PublicationAttempt.id.desc()).first()
+    if attempt:
+        attempt.status, attempt.external_id, attempt.error = job.status, job.external_id, job.error
+        attempt.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    if payload.published:
+        content = db.get(Content, job.content_id)
+        if content:
+            content.status = "PUBLISHED"
+    db.commit()
+    db.refresh(job)
+    return public_record(job)
 
 
 @app.delete("/api/jobs/{job_id}")
+@content_locked
 def delete_job(
     job_id: int,
     db: Session = Depends(get_db),
@@ -866,6 +1068,8 @@ def delete_job(
             "Job not found",
         )
 
+    if job.status != "QUEUED" or job.attempts:
+        raise HTTPException(409, "Only unattempted queued jobs can be deleted; history is retained")
     db.delete(job)
     db.commit()
 
@@ -875,22 +1079,77 @@ def delete_job(
 
 
 @app.get("/api/accounts")
-def accounts(
-    db: Session = Depends(get_db),
-):
-    return (
-        db.query(PlatformAccount)
-        .order_by(PlatformAccount.id)
-        .all()
-    )
+def accounts():
+    return list_accounts()
 
 
 @app.get("/api/tiktok/creator")
-def tiktok_creator():
-    if not settings.tiktok_access_token:
-        raise HTTPException(
-            400,
-            "TikTok access token not configured",
-        )
+def tiktok_creator(account_key: str = "default"):
+    with account_context("tiktok", account_key):
+        return creator_info()
 
-    return creator_info()
+
+@app.post("/api/tiktok/oauth/start")
+def tiktok_oauth_start(account_key: str = "default"):
+    from .integrations.tiktok_auth import authorization_url
+    with account_context("tiktok", account_key):
+        return {"authorization_url": authorization_url(account_key)}
+
+
+@app.get("/api/tiktok/oauth/callback")
+def tiktok_oauth_callback(state: str, code: str = "", error: str = ""):
+    from .integrations.tiktok_auth import consume_state, complete_authorization
+    key = consume_state(state)
+    if error:
+        raise HTTPException(400, "TikTok authorization was declined. Return to the app and connect again.")
+    with account_context("tiktok", key):
+        complete_authorization(code)
+    return {"connected": True, "account_key": key, "message": "TikTok authorization saved. Return to the application."}
+
+
+@app.post("/api/tasks", status_code=202)
+@content_locked
+def submit_task(payload: TaskRequest, db: Session = Depends(get_db)):
+    if not settings.scheduler_enabled:
+        raise HTTPException(503, "Enable SCHEDULER_ENABLED to run durable local processing tasks")
+    if not db.get(Content, payload.content_id):
+        raise HTTPException(404, "Content not found")
+    require_editable(db, payload.content_id)
+    options = dict(payload.options)
+    options.pop("content_id", None)
+    if payload.action in {"voice", "render"}:
+        schema = VoiceRequest if payload.action == "voice" else RenderRequest
+        options = schema(**options, content_id=payload.content_id).model_dump(exclude={"content_id"})
+    else:
+        allowed = {"generate": {"platform", "metadata"}, "metadata": {"platform"}, "translate": {"target"}, "voice-captions": set()}[payload.action]
+        if not set(options) <= allowed:
+            raise HTTPException(422, "Unexpected task options")
+    task = MediaTask(content_id=payload.content_id, action=payload.action, payload=json.dumps(options))
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return {"id": task.id, "status": task.status}
+
+
+@app.get("/api/tasks")
+def task_list(db: Session = Depends(get_db)):
+    return [{"id": task.id, "content_id": task.content_id, "action": task.action, "status": task.status,
+             "error": task.error, "created_at": task.created_at} for task in db.query(MediaTask).order_by(MediaTask.id.desc()).limit(100)]
+
+
+@app.get("/api/tasks/{task_id}")
+def get_task(task_id: int, db: Session = Depends(get_db)):
+    task = db.get(MediaTask, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    return {"id": task.id, "status": task.status, "error": task.error, "result": json.loads(task.result) if task.result else None}
+
+
+@app.post("/api/tasks/{task_id}/retry", status_code=202)
+def retry_task(task_id: int, db: Session = Depends(get_db)):
+    task = db.get(MediaTask, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if task.status != "FAILED":
+        raise HTTPException(409, "Only failed local processing tasks may be retried")
+    return submit_task(TaskRequest(content_id=task.content_id, action=task.action, options=json.loads(task.payload)), db=db)
