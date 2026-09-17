@@ -1,28 +1,121 @@
 import json
+
 from ollama import Client
+
 from ..config import settings
 
-SYSTEM_PROMPT = '''You generate social-media metadata. Return ONLY valid JSON with these keys:
-title: string
-description: string
-hashtags: array of strings
-keywords: array of strings
-Do not invent facts that are not present in the transcript.'''
 
-def generate_metadata(transcript: str, platform: str = "general") -> dict:
+SYSTEM_PROMPT = """
+You generate social-media metadata.
+
+Return ONLY valid JSON with exactly these keys:
+{
+  "title": "string",
+  "description": "string",
+  "hashtags": ["string"],
+  "keywords": ["string"]
+}
+
+Rules:
+- Do not invent facts not present in the transcript.
+- hashtags must be strings.
+- keywords must be strings.
+- title and description must be strings.
+"""
+
+
+def _clean_hashtags(values) -> str:
+    if not isinstance(values, list):
+        return ""
+
+    result = []
+
+    for value in values:
+        text = str(value).strip()
+
+        if not text:
+            continue
+
+        if not text.startswith("#"):
+            text = f"#{text}"
+
+        result.append(text)
+
+    return " ".join(result)
+
+
+def _clean_keywords(values) -> str:
+    if not isinstance(values, list):
+        return ""
+
+    return ", ".join(
+        str(value).strip()
+        for value in values
+        if str(value).strip()
+    )
+
+
+def generate_metadata(
+    transcript: str,
+    platform: str = "general",
+) -> dict:
+    if not transcript.strip():
+        raise ValueError("Transcript cannot be empty.")
+
     client = Client(host=settings.ollama_base_url)
+
     response = client.chat(
         model=settings.ollama_model,
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Platform: {platform}\nTranscript:\n{transcript}"},
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Platform: {platform}\n\n"
+                    f"Transcript:\n{transcript}"
+                ),
+            },
         ],
         format="json",
     )
-    data = json.loads(response["message"]["content"])
+
+    try:
+        raw = response["message"]["content"]
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError(
+            "Ollama returned an invalid metadata response."
+        ) from exc
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Ollama returned invalid JSON for metadata."
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            "Ollama metadata response is not a JSON object."
+        )
+
+    title = str(data.get("title", "")).strip()
+    description = str(data.get("description", "")).strip()
+
+    if not title:
+        raise RuntimeError(
+            "Ollama returned an empty title."
+        )
+
     return {
-        "title": str(data.get("title", "")),
-        "description": str(data.get("description", "")),
-        "hashtags": " ".join(str(x) for x in data.get("hashtags", [])),
-        "keywords": ", ".join(str(x) for x in data.get("keywords", [])),
+        "title": title,
+        "description": description,
+        "hashtags": _clean_hashtags(
+            data.get("hashtags", [])
+        ),
+        "keywords": _clean_keywords(
+            data.get("keywords", [])
+        ),
     }
