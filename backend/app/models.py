@@ -124,6 +124,8 @@ class Job(Base):
         String(30),
     )
 
+    account_key: Mapped[str] = mapped_column(String(80), default="default")
+    options_json: Mapped[str] = mapped_column(Text, default="{}")
     privacy_level: Mapped[str] = mapped_column(String(50), default="")
 
     # Original user-requested publication time.
@@ -208,4 +210,17 @@ class PublicationAttempt(Base):
     external_id: Mapped[str] = mapped_column(String(500), default="")
     error: Mapped[str] = mapped_column(Text, default="")
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class MediaTask(Base):
+    __tablename__ = "media_tasks"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    content_id: Mapped[int] = mapped_column(Integer, ForeignKey("content.id"), index=True)
+    action: Mapped[str] = mapped_column(String(30))
+    payload: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(30), default="QUEUED", index=True)
+    result: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

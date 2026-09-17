@@ -1,3 +1,4 @@
+from contextvars import ContextVar
 from pydantic import Field
 from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,6 +30,13 @@ class Settings(BaseSettings):
     ffprobe_bin: str = "ffprobe"
     process_timeout: int = Field(default=1800, ge=1, le=86400)
     scheduler_enabled: bool = True
+    accounts_dir: str = "./secrets/accounts"
+    runtime_lock_file: str = "./data/runtime.lock"
+    lock_dir: str = "./data/locks"
+    platform_poll_hours: int = Field(default=24, ge=1, le=168)
+    max_media_duration: int = Field(default=3600, ge=1, le=86400)
+    max_media_pixels: int = Field(default=33177600, ge=1)
+    ffmpeg_threads: int = Field(default=2, ge=1, le=32)
     auth_username: str = "owner"
     auth_password: str = ""
     translation_backend: Literal["ollama", "argos"] = "ollama"
@@ -44,6 +52,10 @@ class Settings(BaseSettings):
     youtube_default_privacy: Literal["private", "public", "unlisted"] = "private"
 
     tiktok_access_token: str = ""
+    tiktok_client_key: str = ""
+    tiktok_client_secret: str = ""
+    tiktok_redirect_uri: str = ""
+    tiktok_token_file: str = "./secrets/tiktok_token.json"
     tiktok_privacy_level: str = "SELF_ONLY"
 
     model_config = SettingsConfigDict(
@@ -52,4 +64,17 @@ class Settings(BaseSettings):
     )
 
 
-settings = Settings()
+account_overrides = ContextVar("account_overrides", default={})
+_base_settings = Settings()
+
+
+class SettingsProxy:
+    def __getattr__(self, name):
+        values = account_overrides.get()
+        return values[name] if name in values else getattr(_base_settings, name)
+
+    def __setattr__(self, name, value):
+        setattr(_base_settings, name, value)
+
+
+settings = SettingsProxy()

@@ -5,6 +5,8 @@ from pathlib import Path
 import httpx
 
 from ..config import settings
+from ..media import probe
+from .tiktok_auth import access_token
 
 
 BASE = "https://open.tiktokapis.com/v2"
@@ -17,15 +19,10 @@ SUPPORTED_VIDEO_EXTENSIONS = {
 
 
 def _headers() -> dict[str, str]:
-    if not settings.tiktok_access_token:
-        raise RuntimeError(
-            "TikTok access token not configured"
-        )
-
     return {
         "Authorization": (
             f"Bearer "
-            f"{settings.tiktok_access_token}"
+            f"{access_token()}"
         ),
         "Content-Type": "application/json",
     }
@@ -45,31 +42,9 @@ def _json_response(
     if not isinstance(data, dict):
         raise RuntimeError(f"TikTok {action} returned an invalid response")
 
-    if not response.is_success:
-        error = data.get("error", {})
-
-        message = (
-            error.get("message")
-            if isinstance(error, dict)
-            else None
-        )
-
-        raise RuntimeError(
-            f"TikTok {action} failed: "
-            f"{message or response.text}"
-        )
-
-    error = data.get("error", {})
-
-    if isinstance(error, dict):
-        code = error.get("code")
-
-        if code and code != "ok":
-            raise RuntimeError(
-                f"TikTok {action} failed: "
-                f"{error.get('message') or code}"
-            )
-
+    error = data.get("error") or {}
+    if not response.is_success or not isinstance(error, dict) or error.get("code") not in {None, "ok"}:
+        raise RuntimeError(f"TikTok {action} failed (HTTP {response.status_code}). Check authorization, creator eligibility and platform limits.")
     return data
 
 
@@ -119,6 +94,7 @@ def publish_video(
     media_path: str,
     title: str,
     privacy_level: str | None = None,
+    options: dict | None = None,
 ) -> str:
     path = Path(
         media_path
@@ -149,6 +125,17 @@ def publish_video(
         info,
         privacy_level,
     )
+
+    options = options or {}
+    media_info = probe(str(path))
+    duration = float(media_info.get("format", {}).get("duration", 0))
+    maximum = info.get("max_video_post_duration_sec")
+    if not isinstance(maximum, (int, float)) or maximum <= 0:
+        raise RuntimeError("TikTok creator information did not include a valid maximum video duration")
+    if duration <= 0 or duration > maximum:
+        raise ValueError("Video exceeds this TikTok creator's duration limit or has no valid duration")
+    if options.get("brand_content_toggle") and privacy == "SELF_ONLY":
+        raise ValueError("TikTok branded content cannot use private visibility")
 
     file_size = os.path.getsize(
         path
@@ -192,6 +179,11 @@ def publish_video(
             "total_chunk_count": total_chunks,
         },
     }
+
+    for field in ("disable_comment", "disable_duet", "disable_stitch"):
+        payload["post_info"][field] = payload["post_info"][field] or options.get(field, True)
+    for field in ("brand_content_toggle", "brand_organic_toggle", "is_aigc"):
+        payload["post_info"][field] = bool(options.get(field, False))
 
     response = httpx.post(
         f"{BASE}/post/publish/"
@@ -266,8 +258,7 @@ def publish_video(
 
             if not upload_response.is_success:
                 raise RuntimeError(
-                    "TikTok video upload failed: "
-                    f"{upload_response.text}"
+                    "TikTok binary upload failed. Inspect the saved publish ID before retrying."
                 )
 
             offset = end + 1

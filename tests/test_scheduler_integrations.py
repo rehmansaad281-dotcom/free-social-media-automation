@@ -24,8 +24,11 @@ def add_job(platform="facebook"):
 
 def test_queue_runs_success_once(monkeypatch):
     jid = add_job(); calls = []
-    monkeypatch.setattr(worker, "FacebookPublisher", lambda: SimpleNamespace(publish_reel=lambda *args: calls.append(args) or "remote-id"))
+    monkeypatch.setattr(worker, "FacebookPublisher", lambda: SimpleNamespace(publish_reel=lambda *args: calls.append(args) or "remote-id", get_status=lambda _: {"video_status": "ready", "publishing_phase": {"status": "complete"}}))
     worker.execute_due_jobs(); worker.execute_due_jobs()
+    with SessionLocal() as db:
+        assert db.get(Job, jid).status == "PUBLISHING"
+    worker.poll_platform_jobs()
     assert len(calls) == 1
     with SessionLocal() as db:
         job = db.get(Job, jid)
@@ -63,8 +66,9 @@ def test_retry_preserves_original_time():
 
 def test_tiktok_chunk_remainder(tmp_path, monkeypatch):
     path = tmp_path / "video.mp4"; path.write_bytes(b"x" * 21_000_000)
-    monkeypatch.setattr(tiktok, "creator_info", lambda: {"privacy_level_options": ["SELF_ONLY"]})
+    monkeypatch.setattr(tiktok, "creator_info", lambda: {"privacy_level_options": ["SELF_ONLY"], "max_video_post_duration_sec": 60})
     monkeypatch.setattr(settings, "tiktok_access_token", "test-only")
+    monkeypatch.setattr(tiktok, "probe", lambda path: {"format": {"duration": "2"}})
     payloads = []; chunks = []
     def post(url, **kwargs):
         payloads.append(kwargs["json"])
@@ -104,8 +108,9 @@ def test_facebook_real_transfer_contract(tmp_path, monkeypatch):
 def test_attempt_history_persisted(monkeypatch):
     from backend.app.models import PublicationAttempt
     jid = add_job()
-    monkeypatch.setattr(worker, "FacebookPublisher", lambda: SimpleNamespace(publish_reel=lambda *args: "remote"))
+    monkeypatch.setattr(worker, "FacebookPublisher", lambda: SimpleNamespace(publish_reel=lambda *args: "remote", get_status=lambda _: {"video_status": "ready", "publishing_phase": {"status": "complete"}}))
     worker.execute_due_jobs()
+    worker.poll_platform_jobs()
     with SessionLocal() as db:
         attempt = db.query(PublicationAttempt).filter_by(job_id=jid).one()
         assert attempt.status == "PUBLISHED" and attempt.external_id == "remote"

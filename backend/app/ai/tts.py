@@ -56,6 +56,7 @@ def list_voices():
                 "gender": gender,
                 "language": language,
                 "model_path": str(model),
+                "speakers": config.get("speaker_id_map", {}),
             }
         )
 
@@ -66,6 +67,7 @@ def synthesize(
     text: str,
     output_path: str,
     model_path: str | None = None,
+    speaker_id: int | None = None,
 ) -> str:
     text = text.strip()
 
@@ -96,6 +98,12 @@ def synthesize(
         "--output_file",
         str(output),
     ]
+
+    config = json.loads(Path(str(model) + ".json").read_text())
+    if speaker_id is not None:
+        if speaker_id < 0 or speaker_id >= int(config.get("num_speakers", 1)):
+            raise ValueError("Selected speaker is not present in this Piper model")
+        command.extend(["--speaker", str(speaker_id)])
 
     try:
         subprocess.run(

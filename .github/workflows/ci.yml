@@ -76,3 +76,13 @@ jobs:
           path: build-package
           if-no-files-found: error
           retention-days: 7
+
+  container:
+    name: Docker Build and Real Media Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build production image
+        run: docker build -t social-automation:test .
+      - name: Exercise real container and media pipeline without credentials
+        run: docker run --rm social-automation:test python -m scripts.container_smoke

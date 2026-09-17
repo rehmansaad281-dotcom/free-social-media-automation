@@ -2,6 +2,8 @@ import subprocess
 import json
 import tempfile
 import shutil
+import wave
+import math
 from pathlib import Path
 
 from .config import settings
@@ -10,8 +12,8 @@ from .config import settings
 def run_ffmpeg(args: list[str], cwd=None):
     command = [
         str(Path(settings.ffmpeg_bin).resolve()) if "/" in settings.ffmpeg_bin or "\\" in settings.ffmpeg_bin else settings.ffmpeg_bin,
-        "-y",
-        *args,
+        "-y", "-nostdin", "-v", "error", "-filter_threads", str(settings.ffmpeg_threads),
+        *args[:-1], "-threads", str(settings.ffmpeg_threads), args[-1],
     ]
 
     try:
@@ -57,6 +59,12 @@ def probe(path: str) -> dict:
         raise ValueError("Media is unreadable or unsupported by FFprobe.") from exc
     if not isinstance(data, dict) or not data.get("streams"):
         raise ValueError("Media has no readable streams.")
+    duration = float(data.get("format", {}).get("duration", 0) or 0)
+    if not math.isfinite(duration) or duration < 0 or duration > settings.max_media_duration:
+        raise ValueError("Media duration exceeds MAX_MEDIA_DURATION")
+    for stream in data["streams"]:
+        if int(stream.get("width", 0)) * int(stream.get("height", 0)) > settings.max_media_pixels:
+            raise ValueError("Media resolution exceeds MAX_MEDIA_PIXELS")
     return data
 
 
@@ -72,7 +80,17 @@ def replace_audio(
     video_path: str,
     voice_path: str,
     output_path: str,
+    extend_to_voice: bool = False,
 ):
+    extra = []
+    if extend_to_voice:
+        video_duration = float(probe(video_path).get("format", {}).get("duration", 0))
+        with wave.open(voice_path) as audio:
+            voice_duration = audio.getnframes() / audio.getframerate()
+        if video_duration <= 0 or max(video_duration, voice_duration) > settings.max_media_duration:
+            raise ValueError("Narration/video duration is invalid or exceeds the configured limit")
+        if voice_duration > video_duration:
+            extra = ["-vf", f"tpad=stop_mode=clone:stop_duration={voice_duration-video_duration:.6f}"]
     run_ffmpeg(
         [
             "-i",
@@ -91,6 +109,7 @@ def replace_audio(
             "-c:a",
             "aac",
             "-shortest",
+            *extra,
             output_path,
         ]
     )
@@ -181,9 +200,10 @@ def captions_to_srt(
         )
 
     lines = []
+    previous_end = 0
 
     for index, caption in enumerate(
-        captions,
+        sorted(captions, key=lambda cue: cue.start_ms),
         1,
     ):
         start_ms = int(
@@ -193,13 +213,14 @@ def captions_to_srt(
             caption.end_ms
         )
 
-        if end_ms <= start_ms:
-            continue
+        if start_ms < previous_end or start_ms < 0 or end_ms <= start_ms:
+            raise ValueError("Invalid or overlapping saved captions; repair them in the caption editor")
+        previous_end = end_ms
 
         text = " ".join(str(caption.text).splitlines()).strip()
 
         if not text:
-            continue
+            raise ValueError("Saved caption text cannot be blank")
 
         lines.extend(
             [
@@ -219,3 +240,12 @@ def captions_to_srt(
     )
 
     return str(output)
+
+
+def image_to_video(input_path: str, output_path: str, duration: float):
+    if not 0 < duration <= settings.max_media_duration:
+        raise ValueError("Image video duration is outside the configured limit")
+    run_ffmpeg(["-loop", "1", "-framerate", "30", "-i", input_path,
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-t", str(duration),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", output_path])
+    return output_path

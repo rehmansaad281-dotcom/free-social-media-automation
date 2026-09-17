@@ -5,7 +5,9 @@ from pathlib import Path
 # Set configuration before importing the application; never touch owner data.
 ROOT = tempfile.TemporaryDirectory(prefix="automation-test-")
 os.environ.update(DATABASE_URL=f"sqlite:///{ROOT.name}/app.db", MEDIA_DIR=f"{ROOT.name}/media",
-                  SCHEDULER_ENABLED="false", AUTH_PASSWORD="test-password")
+                  SCHEDULER_ENABLED="false", AUTH_PASSWORD="test-password",
+                  LOCK_DIR=f"{ROOT.name}/locks", RUNTIME_LOCK_FILE=f"{ROOT.name}/runtime.lock",
+                  ACCOUNTS_DIR=f"{ROOT.name}/accounts", TIKTOK_TOKEN_FILE=f"{ROOT.name}/tiktok.json")
 
 import pytest
 from fastapi.testclient import TestClient

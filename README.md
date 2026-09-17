@@ -2,7 +2,7 @@
 
 Private, single-owner social automation using local media/AI and official platform APIs. No paid AI, scraping, browser publishing automation, or platform restriction bypass.
 
-**Deployment status: NOT READY for an unqualified production sign-off.** See [audit and verification report](docs/AUDIT_REPORT.md) for tested behavior and remaining limitations. The application currently configures **one Facebook Page, one YouTube authorization, and one TikTok token per instance**, not an account-switching system.
+**Deployment status: NOT READY for an unqualified production sign-off.** See [audit and verification report](docs/FOLLOWUP_REPORT.md) for tested behavior and remaining limitations. Multiple Facebook Pages, YouTube channels and TikTok accounts are routed through server-side profiles. See [account setup](docs/ACCOUNTS.md).
 
 ## Workflow
 
@@ -13,7 +13,7 @@ Private, single-owner social automation using local media/AI and official platfo
 5. Translate using Ollama (default) or optional **Argos Translate**.
 6. Generate speech using an installed **Piper** voice. Both `.onnx` and `.onnx.json` are required.
 7. If using voice-over with captions, **Generate Captions from Voice-over** first: original audio timings do not match synthesized/translated audio.
-8. Render a browser-compatible H.264/AAC MP4, preview it, and schedule. Rendering never overwrites the source. Short speech is padded rather than truncating the video; speech longer than the video is trimmed.
+8. Render a browser-compatible H.264/AAC MP4, preview it, and schedule. Rendering never overwrites the source. Short speech is padded. Longer narration can extend the final frame (default) or be trimmed explicitly. Still images can render to timed MP4 videos.
 9. Inspect queue and attempt history. Uncertain remote outcomes require explicit owner reconciliation, not blind retries.
 
 ## Local setup
@@ -34,7 +34,7 @@ cp .env.example .env
 Set a strong unique `AUTH_PASSWORD` in `.env`. Without it, the UI/API fail closed (health endpoints remain public). The browser prompts for HTTP Basic credentials (`AUTH_USERNAME=owner`). Never place credentials in source code or chat.
 
 ```bash
-python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
+python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
 Open `http://127.0.0.1:8000`. Use **one process / one Uvicorn worker, without reload**, for the production scheduler. The app must remain running for scheduling. Dates from the UI are converted to UTC; API schedule requests must include an offset.
@@ -53,7 +53,7 @@ The service runs as UID/GID 10001. Precreate `data`, `media`, `secrets`, `models
 docker compose up --build -d
 ```
 
-Docker itself was not available in the audit environment; image build/runtime verification is still required.
+Docker is verified by the GitHub CI image build and in-container real-media smoke-test job when that check passes; consult the follow-up report for the latest recorded result.
 
 ## Tests and data safety
 
@@ -67,6 +67,11 @@ pip check
 
 Tests isolate SQLite/media in temporary directories and do not publish to real accounts. CI installs FFmpeg and runs the suite without secrets. Test-only fixtures/mocks are not production integration implementations.
 
-Back up SQLite and media together before upgrading. Migrations are additive; no normal startup deletes data. New databases use foreign keys, but existing SQLite tables are not destructively rebuilt just to add constraints. After initializing/upgrading, run `python -m scripts.audit_db` to report legacy orphan/invalid records without modifying them.
+Back up SQLite and media together before upgrading. Migrations are additive; no normal startup deletes data. New databases use foreign keys; non-destructive reference/timing triggers also protect legacy tables. After initializing/upgrading, run `python -m scripts.audit_db` to report legacy orphan/invalid records without modifying them.
 
-Never commit `.env`, secrets, OAuth tokens, model binaries, private media, or a local `whisper.cpp/` checkout. Prior successful generated files are retained intentionally; plan storage retention/backups. Failed render temporary directories and partial voice files are cleaned.
+Never commit `.env`, secrets, OAuth tokens, model binaries, private media, or a local `whisper.cpp/` checkout. Prior generated files are retained by default; stop the app and run `python -m scripts.cleanup_media` for a safe dry-run of unreferenced old generated outputs, adding `--apply` only after review. Failed render temporary directories and partial voice files are cleaned.
+
+
+Local AI/render UI actions use the persistent task queue. The Local Processing History panel remains available after reload/disconnection. Failed/interrupted tasks may be retried as new tasks; published jobs never use this local-task retry mechanism. `SCHEDULER_ENABLED=true` is required for queued work.
+
+Default/YouTube/test dependencies are constrained by `backend/constraints.txt`. Optional Argos uses its separately declared dependency file and must be validated with the chosen locally installed language packages.

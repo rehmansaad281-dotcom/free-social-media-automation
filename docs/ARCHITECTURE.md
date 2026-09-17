@@ -1,5 +1,7 @@
 # Architecture and execution flow
 
+> The original execution map below is retained for context. Follow-up additions supersede its boundaries: durable `MediaTask` queue, per-content/runtime file locks, context-local multi-account profiles, and Facebook/YouTube completion polling. See `FOLLOWUP_REPORT.md` and `ACCOUNTS.md`.
+
 ## Entry points and dependencies
 
 - `scripts/run.sh` / Uvicorn → `backend.app.main:app` → lifespan initializes SQLAlchemy schema/additive migrations and APScheduler. One scheduler process is supported.

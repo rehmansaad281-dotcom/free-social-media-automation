@@ -1,5 +1,7 @@
 # Repository audit and implementation report
 
+> Historical baseline. The remaining-component list and test counts below describe the initial implementation. See [FOLLOWUP_REPORT.md](FOLLOWUP_REPORT.md) for subsequent fixes and current verification.
+
 Date: 2026-09-17. Branch: `arena/01a0b09d-free-social-media-automation`.
 
 ## 1. COMPLETED

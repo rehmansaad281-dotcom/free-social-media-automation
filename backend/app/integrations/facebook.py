@@ -46,20 +46,8 @@ class FacebookPublisher:
         except ValueError:
             data = {}
 
-        if not response.is_success:
-            message = (
-                data.get("error", {}).get("message")
-                if isinstance(data, dict)
-                else None
-            )
-
-            raise RuntimeError(
-                f"Facebook {action} failed: "
-                f"{message or response.text}"
-            )
-
-        if not isinstance(data, dict) or data.get("error"):
-            raise RuntimeError(f"Facebook {action} returned an invalid/error response")
+        if not response.is_success or not isinstance(data, dict) or data.get("error"):
+            raise RuntimeError(f"Facebook {action} failed (HTTP {response.status_code}). Check token permissions, media eligibility and Page dashboard.")
         return data
 
     def publish_post(
@@ -222,3 +210,12 @@ class FacebookPublisher:
         )
 
         return str(external_id)
+
+
+    def get_status(self, video_id: str) -> dict:
+        response = httpx.get(f"{self.base}/{video_id}", params={"fields": "status", **self.params}, timeout=60)
+        data = self._raise_for_response(response, "video status")
+        status = data.get("status")
+        if not isinstance(status, dict):
+            raise RuntimeError("Facebook returned no video processing status")
+        return status

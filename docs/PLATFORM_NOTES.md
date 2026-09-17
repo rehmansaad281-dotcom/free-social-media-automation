@@ -1,5 +1,7 @@
 # Official platform integrations
 
+> Follow-up: Facebook/YouTube completion polling, Facebook mode selection, YouTube keyword tags, TikTok OAuth/refresh and creator-duration/disclosure controls are now implemented. Historical limitations below describe the initial audit; current implementation/setup is in `FOLLOWUP_REPORT.md` and `ACCOUNTS.md`.
+
 No real publication was performed in the audit environment. Contract tests intercept HTTP calls; they are not platform approval or live-upload verification.
 
 ## Facebook
