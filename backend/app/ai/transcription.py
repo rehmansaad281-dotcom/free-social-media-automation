@@ -1,292 +1,235 @@
 import json
 import subprocess
-import unicodedata
+import tempfile
 from pathlib import Path
-from uuid import uuid4
 
 from ..config import settings
 
 
-def _resolve_whisper_binary() -> str:
+def _resolve_whisper_binary() -> Path:
     binary = Path(settings.whisper_binary)
 
-    if binary.is_file():
-        return str(binary)
+    if not binary.is_file():
+        raise RuntimeError(
+            f"Whisper binary not found: {binary}"
+        )
 
-    raise RuntimeError(
-        f"Whisper binary not found: {binary}. "
-        "Build whisper.cpp before starting transcription."
-    )
+    return binary
 
 
-def _resolve_whisper_model() -> str:
+def _resolve_whisper_model() -> Path:
     model = Path(settings.whisper_model)
 
-    if model.is_file():
-        return str(model)
+    if not model.is_file():
+        raise RuntimeError(
+            f"Whisper model not found: {model}"
+        )
 
-    raise RuntimeError(
-        f"Whisper model not found: {model}. "
-        "Place a GGML Whisper model at the configured path."
-    )
+    return model
 
 
 def _run_command(
     command: list[str],
-    error_message: str,
-) -> None:
+) -> subprocess.CompletedProcess:
     try:
-        completed = subprocess.run(
+        result = subprocess.run(
             command,
-            check=False,
+            check=True,
             capture_output=True,
             text=True,
         )
-    except OSError as exc:
+    except FileNotFoundError as exc:
         raise RuntimeError(
-            f"{error_message}: {exc}"
+            f"Required executable not found: "
+            f"{command[0]}"
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        details = (
+            exc.stderr.strip()
+            or exc.stdout.strip()
+            or "unknown error"
+        )
+
+        raise RuntimeError(
+            f"Command failed: {details}"
         ) from exc
 
-    if completed.returncode != 0:
-        output = (
-            completed.stderr.strip()
-            or completed.stdout.strip()
-            or "Unknown command error"
-        )
-
-        raise RuntimeError(
-            f"{error_message}: {output}"
-        )
+    return result
 
 
-def _extract_audio(input_path: Path) -> Path:
-    audio_path = (
-        Path(settings.media_dir)
-        / f"whisper_audio_{uuid4().hex}.wav"
-    )
-
-    command = [
-        settings.ffmpeg_bin,
-        "-y",
-        "-i",
-        str(input_path),
-        "-vn",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-c:a",
-        "pcm_s16le",
-        str(audio_path),
-    ]
-
+def _extract_audio(
+    input_path: str,
+    output_path: str,
+):
     _run_command(
-        command,
-        "Failed to extract audio with FFmpeg",
+        [
+            settings.ffmpeg_bin,
+            "-y",
+            "-i",
+            input_path,
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            output_path,
+        ]
     )
 
-    if not audio_path.is_file():
+
+def _parse_whisper_json(
+    json_path: str,
+) -> dict:
+    path = Path(json_path)
+
+    if not path.is_file():
         raise RuntimeError(
-            f"FFmpeg did not create audio file: {audio_path}"
-        )
-
-    return audio_path
-
-
-def _is_special_token(text: str) -> bool:
-    return (
-        text.startswith("[")
-        and text.endswith("]")
-    )
-
-
-def _is_punctuation(text: str) -> bool:
-    cleaned = text.strip()
-
-    if not cleaned:
-        return False
-
-    return all(
-        unicodedata.category(char).startswith("P")
-        for char in cleaned
-    )
-
-
-def _parse_whisper_json(output_file: Path) -> dict:
-    if not output_file.is_file():
-        raise RuntimeError(
-            f"Whisper output JSON was not created: {output_file}"
+            f"Whisper JSON output not found: {path}"
         )
 
     try:
         data = json.loads(
-            output_file.read_text(encoding="utf-8")
+            path.read_text(
+                encoding="utf-8"
+            )
         )
-    except json.JSONDecodeError as exc:
+    except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(
-            f"Invalid Whisper JSON output: {exc}"
+            "Unable to read Whisper JSON output."
         ) from exc
 
-    segments = data.get("transcription", [])
+    transcript = str(
+        data.get("transcription", "")
+    ).strip()
 
-    texts = []
     words = []
 
-    for segment in segments:
-        text = str(
-            segment.get("text", "")
-        ).strip()
+    segments = data.get("segments", [])
 
-        if text:
-            texts.append(text)
-
-        current_word = ""
-        current_start = None
-        current_end = None
-
-        for token in segment.get("tokens", []):
-            if not isinstance(token, dict):
+    if isinstance(segments, list):
+        for segment in segments:
+            if not isinstance(segment, dict):
                 continue
 
-            raw_text = str(
-                token.get("text", "")
-            )
+            tokens = segment.get("tokens", [])
 
-            token_text = raw_text.strip()
-
-            if not token_text:
+            if not isinstance(tokens, list):
                 continue
 
-            if _is_special_token(token_text):
-                continue
+            for token in tokens:
+                if not isinstance(token, dict):
+                    continue
 
-            offsets = token.get("offsets", {})
+                text = str(
+                    token.get("text", "")
+                )
 
-            start_ms = offsets.get("from")
-            end_ms = offsets.get("to")
+                if not text.strip():
+                    continue
 
-            if start_ms is None or end_ms is None:
-                continue
+                start = token.get("offsets", {}).get(
+                    "from"
+                )
+                end = token.get("offsets", {}).get(
+                    "to"
+                )
 
-            start = float(start_ms) / 1000.0
-            end = float(end_ms) / 1000.0
+                if start is None or end is None:
+                    continue
 
-            if end <= start:
-                continue
+                word = text.strip()
 
-            if _is_punctuation(token_text):
-                continue
+                if not word:
+                    continue
 
-            has_leading_space = raw_text[:1].isspace()
+                # Ignore Whisper special tokens.
+                if word.startswith("[") and word.endswith("]"):
+                    continue
 
-            if current_word and has_leading_space:
                 words.append(
                     {
-                        "word": current_word.strip(),
-                        "start": current_start,
-                        "end": current_end,
+                        "text": word,
+                        "start_ms": int(start),
+                        "end_ms": int(end),
                     }
                 )
 
-                current_word = token_text
-                current_start = start
-                current_end = end
-            else:
-                if not current_word:
-                    current_word = token_text
-                    current_start = start
-                else:
-                    current_word += token_text
-
-                current_end = end
-
-        if current_word:
-            words.append(
-                {
-                    "word": current_word.strip(),
-                    "start": current_start,
-                    "end": current_end,
-                }
-            )
-
-    language = (
-        data.get("result", {}).get("language")
-        or "unknown"
+    language = data.get("result", {}).get(
+        "language"
     )
 
-    text = " ".join(texts).strip()
-
-    if not text:
-        raise RuntimeError(
-            "Whisper returned an empty transcription."
-        )
-
-    words = [
-        word
-        for word in words
-        if word["word"]
-    ]
+    if not language:
+        language = data.get("language")
 
     return {
-        "language": language,
-        "text": text,
+        "text": transcript,
+        "language": str(language or ""),
         "words": words,
     }
 
 
-def transcribe(path: str) -> dict:
-    input_path = Path(path)
+def transcribe(
+    input_path: str,
+) -> dict:
+    input_file = Path(input_path)
 
-    if not input_path.is_file():
-        raise FileNotFoundError(
-            f"Media file not found: {input_path}"
+    if not input_file.is_file():
+        raise RuntimeError(
+            f"Media file not found: {input_file}"
         )
 
     whisper_binary = _resolve_whisper_binary()
     whisper_model = _resolve_whisper_model()
 
-    Path(settings.media_dir).mkdir(
-        parents=True,
-        exist_ok=True,
+    temp_dir = Path(
+        tempfile.mkdtemp(
+            prefix="captagram-whisper-"
+        )
     )
 
-    audio_path = None
-
-    output_base = (
-        Path(settings.media_dir)
-        / f"whisper_{uuid4().hex}"
+    audio_path = temp_dir / "audio.wav"
+    output_base = temp_dir / "result"
+    json_path = Path(
+        f"{output_base}.json"
     )
-
-    output_json = output_base.with_suffix(".json")
 
     try:
-        audio_path = _extract_audio(input_path)
-
-        command = [
-            whisper_binary,
-            "--model",
-            whisper_model,
-            "--file",
+        _extract_audio(
+            str(input_file),
             str(audio_path),
-            "--language",
-            "auto",
-            "--output-json",
-            "--output-json-full",
-            "--output-file",
-            str(output_base),
-            "--no-prints",
-        ]
-
-        _run_command(
-            command,
-            "Whisper transcription failed",
         )
 
-        return _parse_whisper_json(output_json)
+        _run_command(
+            [
+                str(whisper_binary),
+                "--model",
+                str(whisper_model),
+                "--file",
+                str(audio_path),
+                "--language",
+                "auto",
+                "--output-json",
+                "--output-json-full",
+                "--output-file",
+                str(output_base),
+                "--no-prints",
+            ]
+        )
+
+        return _parse_whisper_json(
+            str(json_path)
+        )
 
     finally:
-        if audio_path and audio_path.is_file():
-            audio_path.unlink(missing_ok=True)
+        for path in temp_dir.iterdir():
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
-        if output_json.is_file():
-            output_json.unlink(missing_ok=True)
+        try:
+            temp_dir.rmdir()
+        except OSError:
+            pass
