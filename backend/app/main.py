@@ -111,6 +111,26 @@ async def upload_media(
     original_filename = file.filename or "upload"
     ext = Path(original_filename).suffix.lower()
 
+    allowed_extensions = {
+        ".mp4",
+        ".mov",
+        ".m4v",
+        ".avi",
+        ".mkv",
+        ".webm",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".webp",
+        ".gif",
+    }
+
+    if ext not in allowed_extensions:
+        raise HTTPException(
+            400,
+            "Unsupported media file extension",
+        )
+
     name = f"{uuid4().hex}{ext}"
     path = MEDIA_ROOT / name
 
